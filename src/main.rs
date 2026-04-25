@@ -56,7 +56,7 @@ async fn main() {
 
     tracing::info!("Listening on {}", addr);
 
-    let tls_acceptor = match tls::build_server_config(&state.config.server) {
+    let tls_acceptor = match tls::build_server_config(&state.config.server, std::path::Path::new(&args.config)) {
         Ok(Some(server_config)) => {
             tracing::info!("TLS enabled (HTTPS, HTTP/1.1 + HTTP/2)");
             Some(tokio_rustls::TlsAcceptor::from(server_config))

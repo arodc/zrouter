@@ -9,6 +9,7 @@ pub struct FallbackExecutor<'a> {
     pub route: &'a RouteConfig,
     pub registry: &'a Registry,
     pub fallback_config: &'a FallbackConfig,
+    pub original_model: String,
 }
 
 pub enum AttemptOutcome {
@@ -65,7 +66,7 @@ impl<'a> FallbackExecutor<'a> {
     {
         let mut last_status: u16 = 503;
 
-        for step in &self.route.steps {
+        for (step_idx, step) in self.route.steps.iter().enumerate() {
             let provider = match self.registry.get(&step.provider) {
                 Some(p) => p.clone(),
                 None => {
@@ -95,13 +96,23 @@ impl<'a> FallbackExecutor<'a> {
                 step_model: step.model.clone(),
             };
 
-            for attempt in 0..self.fallback_config.max_retries {
+            if step_idx > 0 {
                 tracing::info!(
                     provider = %step.provider,
-                    model = ?step.model,
-                    attempt = attempt + 1,
-                    "Attempting request"
+                    model = %self.original_model,
+                    "Falling back to provider"
                 );
+            }
+
+            for attempt in 0..self.fallback_config.max_retries {
+                if attempt > 0 {
+                    tracing::info!(
+                        provider = %step.provider,
+                        model = %self.original_model,
+                        attempt = attempt + 1,
+                        "Retrying request"
+                    );
+                }
 
                 let body = original_body.clone();
                 match attempt_fn(params.clone(), body).await {

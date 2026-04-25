@@ -75,7 +75,7 @@ pub async fn serve(
                                         serve_connection(io, state, client, remote_addr).await;
                                     }
                                     Err(e) => {
-                                        tracing::error!(error = %e, peer = %remote_addr, "TLS handshake failed");
+                                        tracing::warn!(error = %e, peer = %remote_addr, "TLS handshake failed");
                                     }
                                 }
                             } else {
@@ -114,7 +114,7 @@ where
     });
 
     if let Err(e) = builder.serve_connection(io, service).await {
-        tracing::error!(error = %e, peer = %remote_addr, "Connection error");
+        tracing::debug!(error = %e, peer = %remote_addr, "Connection closed");
     }
 }
 
@@ -187,6 +187,7 @@ async fn handle_request(
         route,
         registry: &state.providers,
         fallback_config: &state.config.fallback,
+        original_model: model.clone(),
     };
 
     let trigger_codes = state.config.fallback.trigger_codes.clone();

@@ -1,5 +1,26 @@
 # ZRouter Development Log
 
+## 2026-04-25 — Fix fallback logging: wrong model field and noisy first-attempt log
+
+- `model=None` was showing `step.model` (optional model override in route step) instead of the actual request model
+- `FallbackExecutor` now receives `original_model` from the request and uses it in log messages
+- "Attempting request" log removed from the happy path; only logs on retry (`attempt > 0`) or fallback (`step_idx > 0`)
+
+## 2026-04-25 — Fix self-signed cert rejected by AI tools
+
+- Root cause: self-signed dev cert regenerated on every restart, never persisted, untrusted by AI tool TLS stacks
+- `tls.rs`: dev cert now saved to `{config_dir}/zrouter-dev-cert.pem` and reused across restarts
+- Key file saved with 0600 permissions (Unix only)
+- Log message shows cert file path for trust store import
+- `server.rs`: post-handshake connection errors demoted from ERROR to DEBUG (client disconnects are benign noise)
+
+## 2026-04-25 — Adjust log timestamp to local timezone, seconds precision
+
+- Custom `LocalTimer` implementing `FormatTime` trait, format `MM/DD/HH:MM:SS`
+- Compute UTC offset once at startup via `OffsetDateTime::now_local()`, cached in `OnceLock`
+- Added `time` crate (already transitive dep via tracing-subscriber) with `local-offset` + `formatting` features
+- Applied to both JSON and text log formats
+
 ## 2026-04-25 — Add HTTPS and HTTP/2 server support
 
 - New `src/tls.rs` module: builds server-side TLS config from PEM cert/key files or auto-generates self-signed dev certificate via `rcgen`
@@ -8,17 +29,5 @@
 - Dependencies: added `rustls-pemfile`, `rcgen`, `tokio-rustls`
 - Verified: plain HTTP, HTTPS with self-signed cert, HTTP/2 negotiation
 
-## 2026-04-25 — Fix Zhipu provider (endpoint + TLS compatibility)
-
-- Changed zhipu endpoint from OpenAI-compatible (`/api/coding/paas/v4`) to Anthropic-compatible (`/api/anthropic`)
-- Fixed TLS handshake failure (`received fatal alert: ProtocolVersion`): `open.bigmodel.cn` requires TLS 1.2 but the default `hyper-rustls` connector didn't negotiate properly. Fixed by building a custom `rustls::ClientConfig` with explicit `with_protocol_versions([TLS12, TLS13])` and adding `rustls` as a direct dependency with `tls12` feature
-- Added HTTP/2 support to the upstream client (`enable_http2()` on connector, `http2` features on `hyper` and `hyper-rustls`)
-- Updated `docs/api-research.md` to document the Anthropic-compatible endpoint
-- Both zhipu (glm-*) and deepseek (deepseek-*) providers verified working end-to-end
-
-## 2026-04-25 — Initial implementation
-
-Full Anthropic API routing daemon: TOML config, route matching (exact/prefix/default), provider registry with atomic circuit breaker, fallback executor with exponential backoff, passthrough proxy, constant-time auth, structured logging, graceful shutdown. 12 unit tests, zero warnings.
-
 ### Earlier logs (summarized)
-API research for Anthropic, DeepSeek, Zhipu, Kimi endpoints. Code review fixed 5 issues. Revised scope from protocol translation to pure passthrough.
+Fixed Zhipu provider endpoint + TLS compatibility, added HTTP/2 to upstream client. Initial implementation: full routing daemon with circuit breaker, fallback, auth, logging. API research and code review.

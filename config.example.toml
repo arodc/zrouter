@@ -12,7 +12,9 @@ max_body_size = 10485760  # 10MB
 # cert_file = "/path/to/cert.pem"
 # key_file = "/path/to/key.pem"
 # If tls = true but cert_file/key_file are not set,
-# a self-signed dev certificate is generated at startup.
+# a self-signed dev certificate is auto-generated and persisted to
+# {config_dir}/zrouter-dev-cert.pem (reuse across restarts).
+# Import the PEM file into your trust store for AI tool access.
 
 [logging]
 level = "info"
