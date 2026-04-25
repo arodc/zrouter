@@ -1,0 +1,75 @@
+# zrouter example configuration
+# Anthropic API routing daemon
+
+[server]
+bind = "127.0.0.1"
+port = 3827
+# api_key = "sk-zrouter-your-key-here"  # Set or use ZROUTER_API_KEY env
+max_body_size = 10485760  # 10MB
+
+[logging]
+level = "info"
+format = "json"  # "json" or "text"
+
+# --- Provider definitions ---
+# Each provider is an Anthropic-compatible endpoint
+
+[providers.anthropic]
+endpoint = "https://api.anthropic.com"
+api_key_env = "ANTHROPIC_API_KEY"
+connect_timeout_secs = 10
+read_timeout_secs = 300
+
+[providers.openrouter]
+endpoint = "https://openrouter.ai/api"
+api_key_env = "OPENROUTER_API_KEY"
+connect_timeout_secs = 10
+read_timeout_secs = 300
+
+[providers.closeai]
+endpoint = "https://api.openai-proxy.org/anthropic"
+api_key_env = "CLOSEAI_API_KEY"
+connect_timeout_secs = 10
+read_timeout_secs = 300
+
+# --- Routing rules ---
+# model: exact match, prefix wildcard ("claude-opus-*"), or "default"
+# Priority: exact > prefix > default
+
+[[route]]
+model = "claude-opus-*"
+steps = [
+  { provider = "anthropic" },
+  { provider = "openrouter" },
+]
+
+[[route]]
+model = "claude-sonnet-*"
+steps = [
+  { provider = "anthropic" },
+  { provider = "closeai" },
+]
+
+[[route]]
+model = "claude-haiku-*"
+steps = [
+  { provider = "closeai" },
+  { provider = "anthropic" },
+]
+
+[[route]]
+model = "default"
+steps = [
+  { provider = "anthropic" },
+  { provider = "closeai" },
+]
+
+# --- Fallback policy ---
+
+[fallback]
+trigger_codes = [429, 500, 502, 503, 504, 529]
+max_retries = 3
+initial_delay_ms = 500
+max_delay_ms = 8000
+circuit_breaker_threshold = 5
+circuit_breaker_cooldown_secs = 60
