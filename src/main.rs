@@ -6,6 +6,7 @@ mod provider;
 mod proxy;
 mod router;
 mod server;
+mod tls;
 
 use std::sync::Arc;
 
@@ -55,8 +56,23 @@ async fn main() {
 
     tracing::info!("Listening on {}", addr);
 
+    let tls_acceptor = match tls::build_server_config(&state.config.server) {
+        Ok(Some(server_config)) => {
+            tracing::info!("TLS enabled (HTTPS, HTTP/1.1 + HTTP/2)");
+            Some(tokio_rustls::TlsAcceptor::from(server_config))
+        }
+        Ok(None) => {
+            tracing::info!("TLS disabled (plain HTTP)");
+            None
+        }
+        Err(e) => {
+            tracing::error!("Failed to configure TLS: {}", e);
+            std::process::exit(1);
+        }
+    };
+
     let shutdown = setup_shutdown_signal();
-    server::serve(listener, state, shutdown).await;
+    server::serve(listener, state, tls_acceptor, shutdown).await;
 
     tracing::info!("zrouter shut down");
 }

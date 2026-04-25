@@ -14,15 +14,15 @@ use crate::provider::Registry;
 use crate::proxy;
 use crate::router;
 
-pub struct AppState {
-    pub config: crate::config::Config,
-    pub providers: Registry,
-}
-
 type HttpClient = hyper_util::client::legacy::Client<
     hyper_rustls::HttpsConnector<hyper_util::client::legacy::connect::HttpConnector>,
     String,
 >;
+
+pub struct AppState {
+    pub config: crate::config::Config,
+    pub providers: Registry,
+}
 
 fn build_http_client() -> HttpClient {
     // Custom TLS config: some upstreams (e.g. open.bigmodel.cn) require
@@ -52,6 +52,7 @@ fn build_http_client() -> HttpClient {
 pub async fn serve(
     listener: tokio::net::TcpListener,
     state: Arc<AppState>,
+    tls_acceptor: Option<tokio_rustls::TlsAcceptor>,
     shutdown_tx: broadcast::Sender<()>,
 ) {
     let client = Arc::new(build_http_client());
@@ -64,20 +65,22 @@ pub async fn serve(
                     Ok((stream, remote_addr)) => {
                         let state = state.clone();
                         let client = client.clone();
+                        let tls_acceptor = tls_acceptor.clone();
 
                         tokio::spawn(async move {
-                            let io = hyper_util::rt::TokioIo::new(stream);
-                            let service = hyper::service::service_fn(move |req| {
-                                let state = state.clone();
-                                let client = client.clone();
-                                async move { handle_request(req, &state, &client).await }
-                            });
-
-                            if let Err(e) = hyper::server::conn::http1::Builder::new()
-                                .serve_connection(io, service)
-                                .await
-                            {
-                                tracing::error!(error = %e, peer = %remote_addr, "Connection error");
+                            if let Some(acceptor) = tls_acceptor {
+                                match acceptor.accept(stream).await {
+                                    Ok(tls_stream) => {
+                                        let io = hyper_util::rt::TokioIo::new(tls_stream);
+                                        serve_connection(io, state, client, remote_addr).await;
+                                    }
+                                    Err(e) => {
+                                        tracing::error!(error = %e, peer = %remote_addr, "TLS handshake failed");
+                                    }
+                                }
+                            } else {
+                                let io = hyper_util::rt::TokioIo::new(stream);
+                                serve_connection(io, state, client, remote_addr).await;
                             }
                         });
                     }
@@ -91,6 +94,27 @@ pub async fn serve(
                 break;
             }
         }
+    }
+}
+
+async fn serve_connection<I>(
+    io: I,
+    state: Arc<AppState>,
+    client: Arc<HttpClient>,
+    remote_addr: std::net::SocketAddr,
+)
+where
+    I: hyper::rt::Read + hyper::rt::Write + Unpin + Send + 'static,
+{
+    let builder = hyper_util::server::conn::auto::Builder::new(TokioExecutor::new());
+    let service = hyper::service::service_fn(move |req| {
+        let state = state.clone();
+        let client = client.clone();
+        async move { handle_request(req, &state, &client).await }
+    });
+
+    if let Err(e) = builder.serve_connection(io, service).await {
+        tracing::error!(error = %e, peer = %remote_addr, "Connection error");
     }
 }
 

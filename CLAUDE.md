@@ -14,7 +14,8 @@ cargo run -- --config config.example.toml   # run with config
 ## Architecture
 - **Entry**: `src/main.rs` — daemon lifecycle, signal handling
 - **Config**: `src/config.rs` — TOML parsing, validation
-- **Server**: `src/server.rs` — hyper HTTP server, request dispatch
+- **Server**: `src/server.rs` — hyper HTTP/HTTPS server (HTTP/1.1 + HTTP/2), request dispatch
+- **TLS**: `src/tls.rs` — server TLS config (PEM loading, self-signed dev cert)
 - **Proxy**: `src/proxy.rs` — model extraction/replacement from JSON body
 - **Router**: `src/router.rs` — route matching (exact > prefix wildcard > default)
 - **Provider**: `src/provider.rs` — provider registry, atomic circuit breaker
@@ -25,7 +26,7 @@ cargo run -- --config config.example.toml   # run with config
 ## Key Constraints
 - **Warnings = build failure** (`[lints.rust] warnings = "deny"`)
 - Pure Anthropic protocol passthrough, no format translation
-- Minimal dependencies (14 crates)
+- Minimal dependencies (17 crates)
 - Circuit breaker: Closed → Open → HalfOpen state machine
 - Streaming: Phase 1 (pre-stream) can fallback, Phase 2 (in-stream) cannot
 
@@ -33,7 +34,7 @@ cargo run -- --config config.example.toml   # run with config
 See `config.example.toml` for full configuration reference.
 
 ## v1 Scope
-- Supported: text requests, streaming passthrough, multi-provider routing, fallback, circuit breaker
+- Supported: text requests, streaming passthrough, multi-provider routing, fallback, circuit breaker, HTTPS (TLS), HTTP/2
 - Not supported: non-Anthropic providers (DeepSeek/Zhipu/Kimi), AWS Bedrock Legacy, Vertex AI, multi-key round-robin
 
 ## Files

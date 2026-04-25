@@ -7,6 +7,13 @@ port = 3827
 # api_key = "sk-zrouter-your-key-here"  # Set or use ZROUTER_API_KEY env
 max_body_size = 10485760  # 10MB
 
+# TLS configuration (uncomment to enable HTTPS)
+# tls = true
+# cert_file = "/path/to/cert.pem"
+# key_file = "/path/to/key.pem"
+# If tls = true but cert_file/key_file are not set,
+# a self-signed dev certificate is generated at startup.
+
 [logging]
 level = "info"
 format = "json"  # "json" or "text"

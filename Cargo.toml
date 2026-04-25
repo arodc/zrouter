@@ -10,6 +10,9 @@ hyper = { version = "1", features = ["server", "client", "http1", "http2"] }
 hyper-util = { version = "0.1", features = ["client-legacy", "server-auto", "tokio"] }
 hyper-rustls = { version = "0.27", default-features = false, features = ["ring", "webpki-tokio", "http1", "http2"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-pemfile = "2"
+rcgen = "0.14"
+tokio-rustls = "0.26"
 http-body-util = "0.1"
 http = "1"
 serde = { version = "1", features = ["derive"] }

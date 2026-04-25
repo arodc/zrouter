@@ -18,6 +18,10 @@ pub struct ServerConfig {
     pub api_key: Option<String>,
     #[serde(default = "default_max_body_size")]
     pub max_body_size: usize,
+    #[serde(default)]
+    pub tls: bool,
+    pub cert_file: Option<String>,
+    pub key_file: Option<String>,
 }
 
 fn default_max_body_size() -> usize {
@@ -146,6 +150,14 @@ fn validate(config: &Config) -> Result<(), Box<dyn std::error::Error + Send + Sy
 
     if config.route.is_empty() {
         return Err("No routes defined".into());
+    }
+
+    if config.server.tls {
+        let has_cert = config.server.cert_file.is_some();
+        let has_key = config.server.key_file.is_some();
+        if has_cert != has_key {
+            return Err("Both cert_file and key_file must be specified together, or neither (for auto-generated dev cert)".into());
+        }
     }
 
     Ok(())
