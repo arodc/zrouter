@@ -1,5 +1,26 @@
 # ZRouter Development Log
 
+## 2026-04-25 — Ensure all active connection interruptions are logged at info/warn level
+
+- Peek timeout (30s no data): `debug` → `info`
+- Connection closed (hyper error): `debug` → `info`
+- Auth failure (401): no log → `warn`
+- TLS handshake failure and protocol mismatch: already `warn` ✓
+
+## 2026-04-25 — Accept Authorization Bearer header for API key auth
+
+- Some clients (e.g. Claude Code) send API key via `Authorization: Bearer <key>` instead of `x-api-key`
+- Server now checks both headers: `x-api-key` first, then `Authorization: Bearer` as fallback
+- Fixes 401 authentication errors from clients that don't use `x-api-key`
+
+## 2026-04-25 — Auto-detect HTTP vs TLS protocol on same port
+
+- `server.rs`: use `TcpStream::peek` to read first byte without consuming it
+- TLS ClientHello starts with 0x16, HTTP starts with ASCII letters
+- When TLS is configured, the port now accepts both HTTPS and plain HTTP connections
+- Logs `Plaintext HTTP on TLS port` at INFO level when HTTP is detected on a TLS-enabled port
+- Fixes `InvalidContentType` handshake error when clients connect with `http://` to HTTPS port
+
 ## 2026-04-25 — Fix fallback logging: wrong model field and noisy first-attempt log
 
 - `model=None` was showing `step.model` (optional model override in route step) instead of the actual request model

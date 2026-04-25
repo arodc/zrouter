@@ -68,17 +68,44 @@ pub async fn serve(
                         let tls_acceptor = tls_acceptor.clone();
 
                         tokio::spawn(async move {
-                            if let Some(acceptor) = tls_acceptor {
-                                match acceptor.accept(stream).await {
-                                    Ok(tls_stream) => {
-                                        let io = hyper_util::rt::TokioIo::new(tls_stream);
-                                        serve_connection(io, state, client, remote_addr).await;
+                            // Detect protocol by peeking first byte without consuming it.
+                            // TLS ClientHello starts with 0x16 (handshake),
+                            // HTTP starts with ASCII ('G'ET, 'P'OST, etc.).
+                            let mut peek_buf = [0u8; 1];
+                            let is_tls = match tokio::time::timeout(
+                                std::time::Duration::from_secs(30),
+                                stream.peek(&mut peek_buf),
+                            ).await {
+                                Ok(Ok(0)) => false,
+                                Ok(Ok(_)) => peek_buf[0] == 0x16,
+                                Ok(Err(e)) => {
+                                    tracing::trace!(error = %e, peer = %remote_addr, "Peek failed");
+                                    false
+                                }
+                                Err(_) => {
+                                    tracing::info!(peer = %remote_addr, "Connection dropped: no data received within 30s");
+                                    return;
+                                }
+                            };
+
+                            if is_tls {
+                                if let Some(acceptor) = tls_acceptor {
+                                    match acceptor.accept(stream).await {
+                                        Ok(tls_stream) => {
+                                            let io = hyper_util::rt::TokioIo::new(tls_stream);
+                                            serve_connection(io, state, client, remote_addr).await;
+                                        }
+                                        Err(e) => {
+                                            tracing::warn!(error = %e, peer = %remote_addr, "TLS handshake failed");
+                                        }
                                     }
-                                    Err(e) => {
-                                        tracing::warn!(error = %e, peer = %remote_addr, "TLS handshake failed");
-                                    }
+                                } else {
+                                    tracing::warn!(peer = %remote_addr, "TLS connection on non-TLS port");
                                 }
                             } else {
+                                if tls_acceptor.is_some() {
+                                    tracing::info!(peer = %remote_addr, "Plaintext HTTP on TLS port");
+                                }
                                 let io = hyper_util::rt::TokioIo::new(stream);
                                 serve_connection(io, state, client, remote_addr).await;
                             }
@@ -114,7 +141,7 @@ where
     });
 
     if let Err(e) = builder.serve_connection(io, service).await {
-        tracing::debug!(error = %e, peer = %remote_addr, "Connection closed");
+        tracing::info!(error = %e, peer = %remote_addr, "Connection closed");
     }
 }
 
@@ -136,8 +163,15 @@ async fn handle_request(
     let provided_key = req
         .headers()
         .get("x-api-key")
-        .and_then(|v| v.to_str().ok());
+        .and_then(|v| v.to_str().ok())
+        .or_else(|| {
+            req.headers()
+                .get("authorization")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.strip_prefix("Bearer "))
+        });
     if !auth::verify_api_key(provided_key, &state.config.server.api_key) {
+        tracing::warn!(trace_id = %trace_id, "Authentication failed");
         return make_error(
             StatusCode::UNAUTHORIZED,
             "authentication_error",
