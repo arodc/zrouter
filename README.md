@@ -1,6 +1,10 @@
 # ZRouter
 
 Anthropic API 路由守护进程。根据模型名称将请求分发到多个 Anthropic 兼容后端，支持回退链、熔断器和 HTTPS。
+它可以将各模型提供方的API汇聚到本地单一API,并遵循配置文件中的路由策略。
+
+ZRouter is an Anthropic API routing daemon. It dispatches requests to multiple Anthropic-compatible backends based on model names, with support for fallback chains, circuit breakers, and HTTPS.
+It can aggregate APIs from various model providers into a single local API endpoint, routing requests according to the policies defined in its configuration file.
 
 ## 功能
 
