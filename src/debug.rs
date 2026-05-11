@@ -101,7 +101,19 @@ pub fn log_request(trace_id: &uuid::Uuid, model: &str, level: &DebugLevel, body:
     );
 
     if level == &DebugLevel::Vv {
-        match serde_json::to_string_pretty(&val) {
+        // Clone so we can trim tool definitions without affecting earlier stats
+        let mut display_val = val.clone();
+        if let Some(tools) = display_val.get_mut("tools").and_then(|t| t.as_array_mut()) {
+            *tools = tools
+                .iter()
+                .map(|t| {
+                    serde_json::json!({
+                        "name": t.get("name").cloned().unwrap_or(serde_json::Value::Null)
+                    })
+                })
+                .collect();
+        }
+        match serde_json::to_string_pretty(&display_val) {
             Ok(pretty) => {
                 tracing::info!(
                     trace_id = %trace_id,
@@ -539,5 +551,56 @@ mod tests {
         });
         let body_str = serde_json::to_string(&body).unwrap();
         log_response(&trace_id, "test", &DebugLevel::V, &body_str);
+    }
+
+    #[test]
+    fn test_vv_mode_tools_stripped_to_names_only() {
+        let trace_id = make_trace_id();
+        let body = serde_json::json!({
+            "model": "claude-sonnet-4-20250514",
+            "max_tokens": 4096,
+            "messages": [
+                {"role": "user", "content": "Hello"},
+            ],
+            "tools": [
+                {
+                    "name": "Bash",
+                    "description": "Run a shell command",
+                    "input_schema": {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]}
+                },
+                {
+                    "name": "Read",
+                    "description": "Read a file",
+                    "input_schema": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}
+                },
+            ],
+        });
+
+        // Simulate the vv-mode trimming logic directly to verify correctness
+        let mut display_val = body.clone();
+        if let Some(tools) = display_val.get_mut("tools").and_then(|t| t.as_array_mut()) {
+            *tools = tools
+                .iter()
+                .map(|t| {
+                    serde_json::json!({
+                        "name": t.get("name").cloned().unwrap_or(serde_json::Value::Null)
+                    })
+                })
+                .collect();
+        }
+
+        let tools_arr = display_val["tools"].as_array().unwrap();
+        assert_eq!(tools_arr.len(), 2);
+        assert_eq!(tools_arr[0], serde_json::json!({"name": "Bash"}));
+        assert_eq!(tools_arr[1], serde_json::json!({"name": "Read"}));
+
+        // Messages remain intact
+        let messages = display_val["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0]["content"], "Hello");
+
+        // Also exercise the full log_request path to ensure no panics
+        let body_bytes = serde_json::to_vec(&body).unwrap();
+        log_request(&trace_id, "claude-sonnet-4-20250514", &DebugLevel::Vv, &body_bytes);
     }
 }

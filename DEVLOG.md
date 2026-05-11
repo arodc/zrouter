@@ -1,5 +1,10 @@
 # ZRouter Development Log
 
+## 2026-05-12 — vv mode: trim tool definitions to names only
+
+- **`src/debug.rs`**: In vv mode, clone the request body value and replace each tool definition with `{"name": "<tool_name>"}` before pretty-printing. This prevents massive `input_schema` objects from flooding logs. Messages, system prompt, and all other fields remain intact.
+- Added test `test_vv_mode_tools_stripped_to_names_only` verifying the trimming logic and that non-tool fields are preserved.
+
 ## 2026-05-12 — Debug logging refinements
 
 - **context_size fixes**: Now counts tool_result block content (string or array of text blocks). Previously missed large tool outputs.
