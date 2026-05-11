@@ -35,11 +35,12 @@ pub fn log_request(trace_id: &uuid::Uuid, model: &str, level: &DebugLevel, body:
             match role {
                 "user" => {
                     user_count += 1;
-                    // Count tool_result blocks inside user message content arrays
                     if let Some(content) = msg.get("content").and_then(|c| c.as_array()) {
                         for block in content {
                             if block.get("type").and_then(|t| t.as_str()) == Some("tool_result") {
                                 tool_result_count += 1;
+                                // Count tool_result content (string or array of text blocks)
+                                content_chars += block_content_len(block.get("content"));
                             }
                         }
                     }
@@ -52,13 +53,12 @@ pub fn log_request(trace_id: &uuid::Uuid, model: &str, level: &DebugLevel, body:
     }
 
     // System prompt
-    let system_info = match val.get("system") {
-        Some(sys) => {
-            let sys_len = text_or_array_length(sys);
-            content_chars += sys_len;
-            format!("present ({} chars)", sys_len)
-        }
-        None => "absent".to_string(),
+    let sys_len = val.get("system").map_or(0, |s| text_or_array_length(s));
+    let system_info = if sys_len > 0 {
+        content_chars += sys_len;
+        format!("{} chars", sys_len)
+    } else {
+        "absent".to_string()
     };
 
     // Tool definitions
@@ -70,14 +70,12 @@ pub fn log_request(trace_id: &uuid::Uuid, model: &str, level: &DebugLevel, body:
         .filter_map(|t| t.get("name").and_then(|n| n.as_str()))
         .collect();
 
-    // Add tool definition sizes to context size (reuse tools from above)
     if let Some(tools_arr) = val.get("tools").and_then(|t| t.as_array()) {
         for tool in tools_arr {
             content_chars += serde_json::to_string(tool).map_or(0, |s| s.len());
         }
     }
 
-    // max_tokens
     let max_tokens = val
         .get("max_tokens")
         .and_then(|t| t.as_u64())
@@ -89,20 +87,19 @@ pub fn log_request(trace_id: &uuid::Uuid, model: &str, level: &DebugLevel, body:
     tracing::info!(
         trace_id = %trace_id,
         model = model,
-        "DEBUG[{}] request:\n  messages: {} (user:{}, assistant:{}, tool_result:{})\n  system: {}\n  tools: {}{}\n  max_tokens: {}\n  context_size: ~{} chars",
-        level_label,
+        level = level_label,
         msg_count,
         user_count,
         assistant_count,
         tool_result_count,
-        system_info,
+        system = %system_info,
         tool_count,
-        format_tool_names(&tool_names),
-        max_tokens,
+        tool_names = %tool_names_display(&tool_names),
+        max_tokens = %max_tokens,
         content_chars,
+        "DEBUG request",
     );
 
-    // vv mode: log full body
     if level == &DebugLevel::Vv {
         match serde_json::to_string_pretty(&val) {
             Ok(pretty) => {
@@ -132,25 +129,71 @@ pub fn log_response(trace_id: &uuid::Uuid, model: &str, level: &DebugLevel, body
         return;
     }
 
+    if body.is_empty() || body.trim().is_empty() {
+        tracing::info!(
+            trace_id = %trace_id,
+            model = model,
+            level = "v",
+            stop_reason = "empty",
+            block_count = 0,
+            text_count = 0,
+            tool_use_count = 0,
+            tool_calls = "",
+            usage = "not available",
+            "DEBUG response: empty body",
+        );
+        return;
+    }
+
     let val: serde_json::Value = match serde_json::from_str(body) {
         Ok(v) => v,
         Err(e) => {
+            // Try SSE: body may contain `data: {...}` lines
+            if body.contains("data: ") {
+                if let Some(json_start) = body.find("data: {") {
+                    let json_part = &body[json_start + 6..]; // skip "data: "
+                    if let Ok(v) = serde_json::from_str(json_part) {
+                        log_response_parsed(trace_id, model, level, &v);
+                        return;
+                    }
+                    // Try last complete SSE event
+                    for segment in body.rsplit("data: ") {
+                        if segment.trim().starts_with('{') {
+                            if let Ok(v) = serde_json::from_str(segment.trim()) {
+                                log_response_parsed(trace_id, model, level, &v);
+                                return;
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
             tracing::warn!(
                 trace_id = %trace_id,
                 model = model,
                 error = %e,
+                body_len = body.len(),
+                body_preview = %&body[..body.len().min(80)],
                 "DEBUG: unable to parse response body"
             );
             return;
         }
     };
 
+    log_response_parsed(trace_id, model, level, &val);
+}
+
+fn log_response_parsed(
+    trace_id: &uuid::Uuid,
+    model: &str,
+    level: &DebugLevel,
+    val: &serde_json::Value,
+) {
     let stop_reason = val
         .get("stop_reason")
         .and_then(|s| s.as_str())
         .unwrap_or("unknown");
 
-    // Content blocks
     let content_blocks = val.get("content").and_then(|c| c.as_array());
     let block_count = content_blocks.map_or(0, |a| a.len());
 
@@ -174,7 +217,6 @@ pub fn log_response(trace_id: &uuid::Uuid, model: &str, level: &DebugLevel, body
         }
     }
 
-    // Usage
     let usage = val.get("usage");
     let input_tokens = usage
         .and_then(|u| u.get("input_tokens"))
@@ -183,31 +225,30 @@ pub fn log_response(trace_id: &uuid::Uuid, model: &str, level: &DebugLevel, body
         .and_then(|u| u.get("output_tokens"))
         .and_then(|t| t.as_u64());
 
-    let level_label = if level == &DebugLevel::Vv { "vv" } else { "v" };
-
     let usage_str = match (input_tokens, output_tokens) {
-        (Some(i), Some(o)) => format!("input={}, output={}", i, o),
+        (Some(i), Some(o)) => format!("input={} output={}", i, o),
         (Some(i), None) => format!("input={}", i),
         (None, Some(o)) => format!("output={}", o),
         (None, None) => "not available".to_string(),
     };
 
+    let level_label = if level == &DebugLevel::Vv { "vv" } else { "v" };
+
     tracing::info!(
         trace_id = %trace_id,
         model = model,
-        "DEBUG[{}] response:\n  stop_reason: {}\n  content_blocks: {} (text:{}, tool_use:{})\n  tool_calls: [{}]\n  usage: {}",
-        level_label,
+        level = level_label,
         stop_reason,
         block_count,
         text_count,
         tool_use_count,
-        tool_call_names.join(", "),
-        usage_str,
+        tool_calls = %tool_call_names.join(", "),
+        usage = %usage_str,
+        "DEBUG response",
     );
 
-    // vv mode: log full body
     if level == &DebugLevel::Vv {
-        match serde_json::to_string_pretty(&val) {
+        match serde_json::to_string_pretty(val) {
             Ok(pretty) => {
                 tracing::info!(
                     trace_id = %trace_id,
@@ -225,6 +266,23 @@ pub fn log_response(trace_id: &uuid::Uuid, model: &str, level: &DebugLevel, body
                 );
             }
         }
+    }
+}
+
+/// Content length of a single content block's value (tool_result content, etc.)
+fn block_content_len(val: Option<&serde_json::Value>) -> usize {
+    match val {
+        Some(serde_json::Value::String(s)) => s.len(),
+        Some(serde_json::Value::Array(arr)) => arr
+            .iter()
+            .map(|b| {
+                b.get("text")
+                    .and_then(|t| t.as_str())
+                    .map(|s| s.len())
+                    .unwrap_or(0)
+            })
+            .sum(),
+        _ => 0,
     }
 }
 
@@ -252,18 +310,11 @@ fn content_length(content: Option<&serde_json::Value>) -> usize {
     content.map_or(0, |v| text_or_array_length(v))
 }
 
-/// Format tool names for display. Shows all if <=6, otherwise shows first 3 + count.
-fn format_tool_names(names: &[&str]) -> String {
-    if names.is_empty() {
-        String::new()
-    } else if names.len() <= 6 {
-        format!(" ({})", names.join(", "))
+fn tool_names_display(names: &[&str]) -> String {
+    if names.len() <= 6 {
+        names.join(", ")
     } else {
-        format!(
-            " ({}, ... +{} more)",
-            names[..3].join(", "),
-            names.len() - 3
-        )
+        format!("{}, ... +{} more", names[..3].join(", "), names.len() - 3)
     }
 }
 
@@ -304,39 +355,26 @@ mod tests {
         });
 
         let body_bytes = serde_json::to_vec(&body).unwrap();
-
-        // Should not panic; exercise both V and Vv levels
         log_request(&trace_id, "claude-sonnet-4-20250514", &DebugLevel::V, &body_bytes);
         log_request(&trace_id, "claude-sonnet-4-20250514", &DebugLevel::Vv, &body_bytes);
-
-        // No assertion on output — we're verifying it doesn't crash and parses correctly.
-        // The actual values are logged, not returned.
     }
 
     #[test]
     fn test_log_request_malformed_json() {
         let trace_id = make_trace_id();
-        let body = b"not json at all";
-
-        // Should log a warning, not panic
-        log_request(&trace_id, "test", &DebugLevel::V, body);
+        log_request(&trace_id, "test", &DebugLevel::V, b"not json at all");
     }
 
     #[test]
     fn test_log_request_empty_body() {
         let trace_id = make_trace_id();
-        let body = b"{}";
-
-        log_request(&trace_id, "test", &DebugLevel::V, body);
+        log_request(&trace_id, "test", &DebugLevel::V, b"{}");
     }
 
     #[test]
     fn test_log_request_none_level_is_noop() {
         let trace_id = make_trace_id();
-        let body = br#"{"model":"x","messages":[]}"#;
-
-        // Should do nothing
-        log_request(&trace_id, "test", &DebugLevel::None, body);
+        log_request(&trace_id, "test", &DebugLevel::None, br#"{"model":"x","messages":[]}"#);
     }
 
     #[test]
@@ -358,7 +396,6 @@ mod tests {
         });
 
         let body_str = serde_json::to_string(&body).unwrap();
-
         log_response(&trace_id, "claude-sonnet-4-20250514", &DebugLevel::V, &body_str);
         log_response(&trace_id, "claude-sonnet-4-20250514", &DebugLevel::Vv, &body_str);
     }
@@ -378,7 +415,6 @@ mod tests {
                 "output_tokens": 20,
             },
         });
-
         let body_str = serde_json::to_string(&body).unwrap();
         log_response(&trace_id, "test", &DebugLevel::V, &body_str);
     }
@@ -386,8 +422,6 @@ mod tests {
     #[test]
     fn test_log_response_malformed_json() {
         let trace_id = make_trace_id();
-
-        // Should log warning, not panic
         log_response(&trace_id, "test", &DebugLevel::V, "not json");
     }
 
@@ -395,6 +429,20 @@ mod tests {
     fn test_log_response_none_level_is_noop() {
         let trace_id = make_trace_id();
         log_response(&trace_id, "test", &DebugLevel::None, r#"{"type":"message"}"#);
+    }
+
+    #[test]
+    fn test_log_response_empty_body() {
+        let trace_id = make_trace_id();
+        log_response(&trace_id, "test", &DebugLevel::V, "");
+        log_response(&trace_id, "test", &DebugLevel::V, "   ");
+    }
+
+    #[test]
+    fn test_log_response_sse_body() {
+        let trace_id = make_trace_id();
+        let sse = r#"data: {"type":"message","stop_reason":"end_turn","content":[],"usage":{"input_tokens":100}}"#;
+        log_response(&trace_id, "test", &DebugLevel::V, sse);
     }
 
     #[test]
@@ -433,20 +481,30 @@ mod tests {
     }
 
     #[test]
-    fn test_format_tool_names_empty() {
-        assert_eq!(format_tool_names(&[]), "");
+    fn test_block_content_len_string() {
+        let val = serde_json::json!("tool result content here");
+        assert_eq!(block_content_len(Some(&val)), 24);
     }
 
     #[test]
-    fn test_format_tool_names_few() {
+    fn test_block_content_len_array() {
+        let val = serde_json::json!([
+            {"type": "text", "text": "output line 1"},
+            {"type": "text", "text": "output line 2"},
+        ]);
+        assert_eq!(block_content_len(Some(&val)), 26);
+    }
+
+    #[test]
+    fn test_tool_names_display_few() {
         let names: Vec<&str> = vec!["read_file", "write_file"];
-        assert_eq!(format_tool_names(&names), " (read_file, write_file)");
+        assert_eq!(tool_names_display(&names), "read_file, write_file");
     }
 
     #[test]
-    fn test_format_tool_names_many() {
+    fn test_tool_names_display_many() {
         let names: Vec<&str> = vec!["a", "b", "c", "d", "e", "f", "g"];
-        let result = format_tool_names(&names);
+        let result = tool_names_display(&names);
         assert!(result.contains("a, b, c"));
         assert!(result.contains("+4 more"));
     }
@@ -465,7 +523,6 @@ mod tests {
                 {"role": "user", "content": "hi"},
             ],
         });
-
         let body_bytes = serde_json::to_vec(&body).unwrap();
         log_request(&trace_id, "test", &DebugLevel::V, &body_bytes);
     }
@@ -480,7 +537,6 @@ mod tests {
                 {"type": "text", "text": "Done."},
             ],
         });
-
         let body_str = serde_json::to_string(&body).unwrap();
         log_response(&trace_id, "test", &DebugLevel::V, &body_str);
     }
