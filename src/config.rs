@@ -69,10 +69,21 @@ fn default_provider_type() -> String {
     "anthropic".to_string()
 }
 
+#[derive(Debug, Deserialize, Clone, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DebugLevel {
+    #[default]
+    None,
+    V,
+    Vv,
+}
+
 #[derive(Debug, Deserialize, Clone)]
 pub struct RouteConfig {
     pub model: String,
     pub steps: Vec<RouteStep>,
+    #[serde(default)]
+    pub debug: DebugLevel,
 }
 
 #[derive(Debug, Deserialize, Clone)]

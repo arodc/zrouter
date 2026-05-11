@@ -1,5 +1,16 @@
 # ZRouter Development Log
 
+## 2026-05-12 — Per-model debug logging
+
+- **`src/config.rs`**: Added `DebugLevel` enum (`None`, `V`, `Vv`) with serde snake_case rename and `Default = None`. Added `debug: DebugLevel` field to `RouteConfig` with `#[serde(default)]`.
+- **`src/debug.rs` (NEW)**: `log_request()` and `log_response()` functions parse Anthropic Messages API JSON bodies. V mode logs message counts (by role), system prompt presence/length, tool definition names, max_tokens, approximate context size (request); stop_reason, content block counts, tool call names, usage tokens (response). Vv mode adds pretty-printed full body. All JSON parse failures are caught and logged as warnings — never causes request failure.
+- **`src/server.rs`**: After route resolution, calls `debug::log_request` if route.debug != None. Before returning successful response, calls `debug::log_response` if route.debug != None.
+- **`src/main.rs`**: Added `mod debug;`.
+- **`src/router.rs`**, **`src/fallback.rs`**: Updated test helpers `make_route()` to include `debug: DebugLevel::default()`.
+- **`config.example.toml`**: Added commented `debug = "v"` example on first route.
+
+### Earlier logs (summarized)
+
 ## 2026-05-12 — Fallback mechanism refactoring: HealthState + probe + multi-provider error mapping
 
 - **New `src/error_map.rs`**: Multi-provider error code classification with `ProviderType` enum (Anthropic, Deepseek, Zhipu, Kimi, OpenAi) and `ErrorClassifier` with per-provider presets. Classifies HTTP responses into Success/Retryable/NonRetryable/Fatal. Supports global config overrides.

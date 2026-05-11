@@ -21,6 +21,7 @@ cargo run -- --config config.example.toml   # run with config
 - **Provider**: `src/provider.rs` — provider registry, atomic circuit breaker
 - **Fallback**: `src/fallback.rs` — retry loop with exponential backoff
 - **Auth**: `src/auth.rs` — API key verification (constant-time)
+- **Debug**: `src/debug.rs` — per-route debug logging (V: context summary, Vv: full body)
 - **Logging**: `src/logging.rs` — structured JSON/text logging
 
 ## Key Constraints

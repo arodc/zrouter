@@ -1,5 +1,6 @@
 mod auth;
 mod config;
+mod debug;
 mod error_map;
 mod fallback;
 mod logging;

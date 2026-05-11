@@ -70,6 +70,7 @@ mod tests {
                     model: None,
                 })
                 .collect(),
+            debug: crate::config::DebugLevel::default(),
         }
     }
 

@@ -9,6 +9,7 @@ use hyper_util::rt::TokioExecutor;
 use tokio::sync::broadcast;
 
 use crate::auth;
+use crate::config::DebugLevel;
 use crate::error_map::{Classification, ErrorClassifier};
 use crate::fallback::{AttemptOutcome, AttemptParams, FallbackExecutor};
 use crate::provider::Registry;
@@ -222,6 +223,11 @@ async fn handle_request(
 
     let fallback_config = &state.config.fallback;
 
+    // Per-route debug logging (request side)
+    if route.debug != DebugLevel::None {
+        crate::debug::log_request(&trace_id, &model, &route.debug, &body_bytes);
+    }
+
     let executor = FallbackExecutor {
         route,
         registry: &state.providers,
@@ -256,6 +262,11 @@ async fn handle_request(
                 status = fallback_result.status,
                 "Request completed"
             );
+
+            // Per-route debug logging (response side)
+            if route.debug != DebugLevel::None {
+                crate::debug::log_response(&trace_id, &model, &route.debug, &fallback_result.body);
+            }
 
             let status = StatusCode::from_u16(fallback_result.status)
                 .unwrap_or(StatusCode::OK);
