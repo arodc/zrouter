@@ -1,5 +1,10 @@
 # ZRouter Development Log
 
+## 2026-05-12 — Startup version info
+
+- **`build.rs`**: Extracts git commit via `git describe --always --dirty --broken` and sets `GIT_COMMIT` env for compile-time use.
+- **`src/main.rs`**: Startup log now includes `CARGO_PKG_VERSION` and `GIT_COMMIT` fields.
+
 ## 2026-05-12 — Per-model debug logging
 
 - **`src/config.rs`**: Added `DebugLevel` enum (`None`, `V`, `Vv`) with serde snake_case rename and `Default = None`. Added `debug: DebugLevel` field to `RouteConfig` with `#[serde(default)]`.

@@ -33,7 +33,9 @@ async fn main() {
 
     logging::init(&config.logging);
 
-    tracing::info!("zrouter starting");
+    let version = env!("CARGO_PKG_VERSION");
+    let git_commit = option_env!("GIT_COMMIT").unwrap_or("unknown");
+    tracing::info!(version, git_commit, "zrouter starting");
 
     // 1. Create probe notify first
     let probe_notify = Arc::new(tokio::sync::Notify::new());
