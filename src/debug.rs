@@ -1,5 +1,8 @@
 use crate::config::DebugLevel;
 
+const TEXT_PREVIEW_LEN: usize = 200;
+const TOOL_NAMES_SHOWN: usize = 6;
+
 /// Log debug information about an Anthropic Messages API request.
 /// Never panics — JSON parse failures are logged as warnings.
 pub fn log_request(trace_id: &uuid::Uuid, model: &str, level: &DebugLevel, body: &[u8]) {
@@ -20,6 +23,8 @@ pub fn log_request(trace_id: &uuid::Uuid, model: &str, level: &DebugLevel, body:
         }
     };
 
+    let level_tag = if level == &DebugLevel::Vv { "vv" } else { "v" };
+
     // Extract message counts by role
     let messages = val.get("messages").and_then(|m| m.as_array());
     let msg_count = messages.map_or(0, |a| a.len());
@@ -39,7 +44,6 @@ pub fn log_request(trace_id: &uuid::Uuid, model: &str, level: &DebugLevel, body:
                         for block in content {
                             if block.get("type").and_then(|t| t.as_str()) == Some("tool_result") {
                                 tool_result_count += 1;
-                                // Count tool_result content (string or array of text blocks)
                                 content_chars += block_content_len(block.get("content"));
                             }
                         }
@@ -54,12 +58,9 @@ pub fn log_request(trace_id: &uuid::Uuid, model: &str, level: &DebugLevel, body:
 
     // System prompt
     let sys_len = val.get("system").map_or(0, |s| text_or_array_length(s));
-    let system_info = if sys_len > 0 {
+    if sys_len > 0 {
         content_chars += sys_len;
-        format!("{} chars", sys_len)
-    } else {
-        "absent".to_string()
-    };
+    }
 
     // Tool definitions
     let tools = val.get("tools").and_then(|t| t.as_array());
@@ -82,55 +83,52 @@ pub fn log_request(trace_id: &uuid::Uuid, model: &str, level: &DebugLevel, body:
         .map(|t| t.to_string())
         .unwrap_or_else(|| "not set".to_string());
 
-    let level_label = if level == &DebugLevel::Vv { "vv" } else { "v" };
+    // Build v-mode summary message
+    let system_line = if sys_len > 0 {
+        format!("{} chars", sys_len)
+    } else {
+        "absent".to_string()
+    };
+
+    let msg = format!(
+        "DEBUG[{level_tag}] request | model: {model} | trace_id: {trace_id}\n\
+         \x20 messages: {msg_count}\n\
+         \x20   user: {user_count}\n\
+         \x20   assistant: {assistant_count}\n\
+         \x20   tool_result: {tool_result_count}\n\
+         \x20 system: {system_line}\n\
+         \x20 tools: {tool_count} [{tools_display}]\n\
+         \x20 max_tokens: {max_tokens}\n\
+         \x20 context_size: ~{content_chars} chars",
+        level_tag = level_tag,
+        model = model,
+        trace_id = trace_id,
+        msg_count = msg_count,
+        user_count = user_count,
+        assistant_count = assistant_count,
+        tool_result_count = tool_result_count,
+        system_line = system_line,
+        tool_count = tool_count,
+        tools_display = format_tool_names(&tool_names),
+        max_tokens = max_tokens,
+        content_chars = content_chars,
+    );
 
     tracing::info!(
         trace_id = %trace_id,
         model = model,
-        level = level_label,
-        msg_count,
-        user_count,
-        assistant_count,
-        tool_result_count,
-        system = %system_info,
-        tool_count,
-        tool_names = %tool_names_display(&tool_names),
-        max_tokens = %max_tokens,
-        content_chars,
-        "DEBUG request",
+        debug_level = level_tag,
+        message = %msg,
     );
 
+    // vv mode: detailed body with formatted messages
     if level == &DebugLevel::Vv {
-        // Clone so we can trim tool definitions without affecting earlier stats
-        let mut display_val = val.clone();
-        if let Some(tools) = display_val.get_mut("tools").and_then(|t| t.as_array_mut()) {
-            *tools = tools
-                .iter()
-                .map(|t| {
-                    serde_json::json!({
-                        "name": t.get("name").cloned().unwrap_or(serde_json::Value::Null)
-                    })
-                })
-                .collect();
-        }
-        match serde_json::to_string_pretty(&display_val) {
-            Ok(pretty) => {
-                tracing::info!(
-                    trace_id = %trace_id,
-                    model = model,
-                    "DEBUG[vv] request body:\n{}",
-                    pretty,
-                );
-            }
-            Err(e) => {
-                tracing::warn!(
-                    trace_id = %trace_id,
-                    model = model,
-                    error = %e,
-                    "DEBUG[vv] unable to pretty-print request body"
-                );
-            }
-        }
+        let detail = format_request_body_vv(trace_id, model, &val, &tool_names);
+        tracing::info!(
+            trace_id = %trace_id,
+            model = model,
+            message = %detail,
+        );
     }
 }
 
@@ -142,17 +140,18 @@ pub fn log_response(trace_id: &uuid::Uuid, model: &str, level: &DebugLevel, body
     }
 
     if body.is_empty() || body.trim().is_empty() {
+        let msg = format!(
+            "DEBUG[v] response | model: {} | trace_id: {}\n\
+             \x20 stop_reason: empty\n\
+             \x20 content_blocks: 0\n\
+             \x20 usage: not available",
+            model, trace_id
+        );
         tracing::info!(
             trace_id = %trace_id,
             model = model,
-            level = "v",
-            stop_reason = "empty",
-            block_count = 0,
-            text_count = 0,
-            tool_use_count = 0,
-            tool_calls = "",
-            usage = "not available",
-            "DEBUG response: empty body",
+            debug_level = "v",
+            message = %msg,
         );
         return;
     }
@@ -238,46 +237,306 @@ fn log_response_parsed(
         .and_then(|t| t.as_u64());
 
     let usage_str = match (input_tokens, output_tokens) {
-        (Some(i), Some(o)) => format!("input={} output={}", i, o),
+        (Some(i), Some(o)) => format!("input={}, output={}", i, o),
         (Some(i), None) => format!("input={}", i),
         (None, Some(o)) => format!("output={}", o),
         (None, None) => "not available".to_string(),
     };
 
-    let level_label = if level == &DebugLevel::Vv { "vv" } else { "v" };
+    let level_tag = if level == &DebugLevel::Vv { "vv" } else { "v" };
 
+    // Build v-mode summary
+    let mut lines = vec![
+        format!(
+            "DEBUG[{}] response | model: {} | trace_id: {}",
+            level_tag, model, trace_id
+        ),
+        format!("  stop_reason: {}", stop_reason),
+        format!("  content_blocks: {}", block_count),
+    ];
+
+    // Sub-counts for content blocks
+    if block_count > 0 {
+        if text_count > 0 {
+            lines.push(format!("    text: {}", text_count));
+        }
+        if tool_use_count > 0 {
+            let names_str = format_tool_names(&tool_call_names);
+            lines.push(format!("    tool_use: {} [{}]", tool_use_count, names_str));
+        }
+    }
+
+    lines.push(format!("  usage: {}", usage_str));
+
+    let msg = lines.join("\n");
     tracing::info!(
         trace_id = %trace_id,
         model = model,
-        level = level_label,
-        stop_reason,
-        block_count,
-        text_count,
-        tool_use_count,
-        tool_calls = %tool_call_names.join(", "),
-        usage = %usage_str,
-        "DEBUG response",
+        debug_level = level_tag,
+        message = %msg,
     );
 
+    // vv mode: detailed content blocks
     if level == &DebugLevel::Vv {
-        match serde_json::to_string_pretty(val) {
-            Ok(pretty) => {
-                tracing::info!(
-                    trace_id = %trace_id,
-                    model = model,
-                    "DEBUG[vv] response body:\n{}",
-                    pretty,
-                );
-            }
-            Err(e) => {
-                tracing::warn!(
-                    trace_id = %trace_id,
-                    model = model,
-                    error = %e,
-                    "DEBUG[vv] unable to pretty-print response body"
-                );
+        let detail = format_response_body_vv(trace_id, model, val, stop_reason, content_blocks, &usage_str);
+        tracing::info!(
+            trace_id = %trace_id,
+            model = model,
+            message = %detail,
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// vv-mode body formatting
+// ---------------------------------------------------------------------------
+
+fn format_request_body_vv(
+    trace_id: &uuid::Uuid,
+    model: &str,
+    val: &serde_json::Value,
+    tool_names: &[&str],
+) -> String {
+    let mut lines = vec![format!(
+        "DEBUG[vv] request body | model: {} | trace_id: {}",
+        model, trace_id
+    )];
+
+    // Messages
+    if let Some(msgs) = val.get("messages").and_then(|m| m.as_array()) {
+        for (i, msg) in msgs.iter().enumerate() {
+            let role = msg.get("role").and_then(|r| r.as_str()).unwrap_or("unknown");
+            let content = msg.get("content");
+
+            match role {
+                "user" => {
+                    // Check for tool_result blocks
+                    if let Some(arr) = content.and_then(|c| c.as_array()) {
+                        let tool_result_count = arr
+                            .iter()
+                            .filter(|b| b.get("type").and_then(|t| t.as_str()) == Some("tool_result"))
+                            .count();
+                        if tool_result_count > 0 {
+                            let total_len: usize = arr
+                                .iter()
+                                .filter(|b| b.get("type").and_then(|t| t.as_str()) == Some("tool_result"))
+                                .map(|b| block_content_len(b.get("content")))
+                                .sum();
+                            lines.push(format!(
+                                "  messages[{}] user (tool_result: {} blocks): {} chars",
+                                i,
+                                tool_result_count,
+                                total_len
+                            ));
+                            continue;
+                        }
+                    }
+                    let preview = content_preview(content);
+                    lines.push(format!("  messages[{}] user: {}", i, preview));
+                }
+                "assistant" => {
+                    // Check for tool_use blocks
+                    if let Some(arr) = content.and_then(|c| c.as_array()) {
+                        let tool_uses: Vec<&str> = arr
+                            .iter()
+                            .filter(|b| b.get("type").and_then(|t| t.as_str()) == Some("tool_use"))
+                            .filter_map(|b| b.get("name").and_then(|n| n.as_str()))
+                            .collect();
+                        if !tool_uses.is_empty() {
+                            let text_preview = extract_text_from_blocks(arr);
+                            if text_preview.is_empty() {
+                                lines.push(format!(
+                                    "  messages[{}] assistant (tool_use: [{}])",
+                                    i,
+                                    tool_uses.join(", ")
+                                ));
+                            } else {
+                                lines.push(format!(
+                                    "  messages[{}] assistant: {} (tool_use: [{}])",
+                                    i,
+                                    truncate_str(&text_preview, TEXT_PREVIEW_LEN),
+                                    tool_uses.join(", ")
+                                ));
+                            }
+                            continue;
+                        }
+                    }
+                    let preview = content_preview(content);
+                    lines.push(format!("  messages[{}] assistant: {}", i, preview));
+                }
+                _ => {
+                    let preview = content_preview(content);
+                    lines.push(format!("  messages[{}] {}: {}", i, role, preview));
+                }
             }
         }
+    }
+
+    // System
+    if let Some(sys) = val.get("system") {
+        let sys_text = match sys {
+            serde_json::Value::String(s) => s.clone(),
+            serde_json::Value::Array(arr) => arr
+                .iter()
+                .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            _ => String::new(),
+        };
+        if !sys_text.is_empty() {
+            lines.push(format!("  system: {:?}", truncate_str(&sys_text, TEXT_PREVIEW_LEN)));
+        }
+    }
+
+    // Tools
+    if !tool_names.is_empty() {
+        lines.push(format!(
+            "  tools: [{}]",
+            format_tool_names(tool_names)
+        ));
+    }
+
+    // max_tokens
+    if let Some(mt) = val.get("max_tokens").and_then(|t| t.as_u64()) {
+        lines.push(format!("  max_tokens: {}", mt));
+    }
+
+    lines.join("\n")
+}
+
+fn format_response_body_vv(
+    trace_id: &uuid::Uuid,
+    model: &str,
+    val: &serde_json::Value,
+    stop_reason: &str,
+    content_blocks: Option<&Vec<serde_json::Value>>,
+    usage_str: &str,
+) -> String {
+    let mut lines = vec![format!(
+        "DEBUG[vv] response body | model: {} | trace_id: {}",
+        model, trace_id
+    )];
+
+    lines.push(format!("  stop_reason: {}", stop_reason));
+
+    if let Some(blocks) = content_blocks {
+        for (i, block) in blocks.iter().enumerate() {
+            let block_type = block.get("type").and_then(|t| t.as_str()).unwrap_or("unknown");
+            match block_type {
+                "text" => {
+                    let text = block
+                        .get("text")
+                        .and_then(|t| t.as_str())
+                        .unwrap_or("");
+                    lines.push(format!(
+                        "  content[{}] text: {:?} ({} chars)",
+                        i,
+                        truncate_str(text, TEXT_PREVIEW_LEN),
+                        text.len()
+                    ));
+                }
+                "tool_use" => {
+                    let name = block
+                        .get("name")
+                        .and_then(|n| n.as_str())
+                        .unwrap_or("unknown");
+                    let input = block
+                        .get("input")
+                        .map(|inp| format_compact_json(inp))
+                        .unwrap_or_default();
+                    lines.push(format!(
+                        "  content[{}] tool_use: {} {}",
+                        i, name, input
+                    ));
+                }
+                _ => {
+                    lines.push(format!("  content[{}] {}: ...", i, block_type));
+                }
+            }
+        }
+    }
+
+    lines.push(format!("  usage: {}", usage_str));
+
+    // Omit the unused `val` warning — val is kept for potential future field extraction
+    let _ = val;
+
+    lines.join("\n")
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/// Format tool names for display: up to TOOL_NAMES_SHOWN, then "... +N more".
+fn format_tool_names(names: &[&str]) -> String {
+    if names.len() <= TOOL_NAMES_SHOWN {
+        names.join(", ")
+    } else {
+        let shown = &names[..TOOL_NAMES_SHOWN];
+        format!("{}, ... +{} more", shown.join(", "), names.len() - TOOL_NAMES_SHOWN)
+    }
+}
+
+/// Truncate string to max_len chars with "..." suffix if needed.
+fn truncate_str(s: &str, max_len: usize) -> &str {
+    if s.len() <= max_len {
+        s
+    } else {
+        // Find a valid char boundary
+        let mut end = max_len;
+        while end > 0 && !s.is_char_boundary(end) {
+            end -= 1;
+        }
+        // We return the truncated part; caller appends "..." in context
+        &s[..end]
+    }
+}
+
+/// Get a text preview from a content field (string or array).
+fn content_preview(content: Option<&serde_json::Value>) -> String {
+    match content {
+        Some(serde_json::Value::String(s)) => {
+            format!("{:?}", truncate_str(s, TEXT_PREVIEW_LEN))
+        }
+        Some(serde_json::Value::Array(arr)) => {
+            let text = extract_text_from_blocks(arr);
+            if text.is_empty() {
+                "[blocks]".to_string()
+            } else {
+                format!("{:?}", truncate_str(&text, TEXT_PREVIEW_LEN))
+            }
+        }
+        _ => "absent".to_string(),
+    }
+}
+
+/// Extract concatenated text from an array of content blocks.
+fn extract_text_from_blocks(blocks: &[serde_json::Value]) -> String {
+    blocks
+        .iter()
+        .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
+        .collect::<Vec<_>>()
+        .join("")
+}
+
+/// Format a JSON value compactly for inline display (tool_use input, etc.)
+fn format_compact_json(val: &serde_json::Value) -> String {
+    match val {
+        serde_json::Value::Object(map) if !map.is_empty() => {
+            let pairs: Vec<String> = map
+                .iter()
+                .map(|(k, v)| {
+                    let v_str = match v {
+                        serde_json::Value::String(s) => s.clone(),
+                        other => other.to_string(),
+                    };
+                    format!("{}: {:?}", k, truncate_str(&v_str, 80))
+                })
+                .collect();
+            format!("{{{}}}", pairs.join(", "))
+        }
+        _ => val.to_string(),
     }
 }
 
@@ -322,13 +581,9 @@ fn content_length(content: Option<&serde_json::Value>) -> usize {
     content.map_or(0, |v| text_or_array_length(v))
 }
 
-fn tool_names_display(names: &[&str]) -> String {
-    if names.len() <= 6 {
-        names.join(", ")
-    } else {
-        format!("{}, ... +{} more", names[..3].join(", "), names.len() - 3)
-    }
-}
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
@@ -508,17 +763,54 @@ mod tests {
     }
 
     #[test]
-    fn test_tool_names_display_few() {
+    fn test_format_tool_names_few() {
         let names: Vec<&str> = vec!["read_file", "write_file"];
-        assert_eq!(tool_names_display(&names), "read_file, write_file");
+        assert_eq!(format_tool_names(&names), "read_file, write_file");
     }
 
     #[test]
-    fn test_tool_names_display_many() {
+    fn test_format_tool_names_exactly_six() {
+        let names: Vec<&str> = vec!["a", "b", "c", "d", "e", "f"];
+        assert_eq!(format_tool_names(&names), "a, b, c, d, e, f");
+    }
+
+    #[test]
+    fn test_format_tool_names_seven() {
         let names: Vec<&str> = vec!["a", "b", "c", "d", "e", "f", "g"];
-        let result = tool_names_display(&names);
-        assert!(result.contains("a, b, c"));
+        let result = format_tool_names(&names);
+        assert_eq!(result, "a, b, c, d, e, f, ... +1 more");
+    }
+
+    #[test]
+    fn test_format_tool_names_many() {
+        let names: Vec<&str> = vec!["a", "b", "c", "d", "e", "f", "g", "h", "i", "j"];
+        let result = format_tool_names(&names);
+        assert!(result.contains("a, b, c, d, e, f"));
         assert!(result.contains("+4 more"));
+    }
+
+    #[test]
+    fn test_truncate_str_short() {
+        assert_eq!(truncate_str("hello", 10), "hello");
+    }
+
+    #[test]
+    fn test_truncate_str_exact() {
+        assert_eq!(truncate_str("hello", 5), "hello");
+    }
+
+    #[test]
+    fn test_truncate_str_long() {
+        assert_eq!(truncate_str("hello world", 5), "hello");
+    }
+
+    #[test]
+    fn test_truncate_str_unicode() {
+        // "café" = "cafe" + combining acute = 5 chars, 6 bytes
+        let s = "cafe\u{0301}xyz";
+        let truncated = truncate_str(s, 5);
+        // Should not panic on char boundary
+        assert!(truncated.len() <= 5);
     }
 
     #[test]
@@ -554,7 +846,7 @@ mod tests {
     }
 
     #[test]
-    fn test_vv_mode_tools_stripped_to_names_only() {
+    fn test_vv_mode_request_shows_tool_names_not_raw_json() {
         let trace_id = make_trace_id();
         let body = serde_json::json!({
             "model": "claude-sonnet-4-20250514",
@@ -576,31 +868,92 @@ mod tests {
             ],
         });
 
-        // Simulate the vv-mode trimming logic directly to verify correctness
-        let mut display_val = body.clone();
-        if let Some(tools) = display_val.get_mut("tools").and_then(|t| t.as_array_mut()) {
-            *tools = tools
-                .iter()
-                .map(|t| {
-                    serde_json::json!({
-                        "name": t.get("name").cloned().unwrap_or(serde_json::Value::Null)
-                    })
-                })
-                .collect();
-        }
-
-        let tools_arr = display_val["tools"].as_array().unwrap();
-        assert_eq!(tools_arr.len(), 2);
-        assert_eq!(tools_arr[0], serde_json::json!({"name": "Bash"}));
-        assert_eq!(tools_arr[1], serde_json::json!({"name": "Read"}));
-
-        // Messages remain intact
-        let messages = display_val["messages"].as_array().unwrap();
-        assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0]["content"], "Hello");
-
-        // Also exercise the full log_request path to ensure no panics
+        // Verify vv mode logs without panicking and uses names only (no raw JSON)
         let body_bytes = serde_json::to_vec(&body).unwrap();
         log_request(&trace_id, "claude-sonnet-4-20250514", &DebugLevel::Vv, &body_bytes);
+
+        // Verify internal formatting produces name-only output
+        let tool_names: Vec<&str> = body
+            .get("tools")
+            .and_then(|t| t.as_array())
+            .into_iter()
+            .flatten()
+            .filter_map(|t| t.get("name").and_then(|n| n.as_str()))
+            .collect();
+        let detail = format_request_body_vv(&trace_id, "claude-sonnet-4-20250514", &body, &tool_names);
+        assert!(detail.contains("tools: [Bash, Read]"));
+        assert!(!detail.contains("input_schema"));
+        assert!(!detail.contains("description"));
+    }
+
+    #[test]
+    fn test_vv_mode_response_shows_formatted_blocks() {
+        let trace_id = make_trace_id();
+        let val = serde_json::json!({
+            "type": "message",
+            "stop_reason": "tool_use",
+            "content": [
+                {"type": "text", "text": "I'll read that file for you."},
+                {"type": "tool_use", "id": "tu_1", "name": "read_file", "input": {"path": "/tmp/test.txt"}},
+                {"type": "text", "text": "Done."},
+            ],
+            "usage": {"input_tokens": 28450, "output_tokens": 342},
+        });
+
+        let blocks = val.get("content").and_then(|c| c.as_array()).unwrap();
+        let detail = format_response_body_vv(
+            &trace_id,
+            "claude-sonnet-4-20250514",
+            &val,
+            "tool_use",
+            Some(blocks),
+            "input=28450, output=342",
+        );
+
+        assert!(detail.contains("content[0] text:"));
+        assert!(detail.contains("content[1] tool_use: read_file"));
+        assert!(detail.contains("content[2] text:"));
+        assert!(!detail.contains("{\n")); // no raw JSON
+    }
+
+    #[test]
+    fn test_vv_mode_user_tool_result_message() {
+        let trace_id = make_trace_id();
+        let body = serde_json::json!({
+            "model": "claude-sonnet-4-20250514",
+            "max_tokens": 1024,
+            "messages": [
+                {"role": "user", "content": "Check this"},
+                {"role": "assistant", "content": [
+                    {"type": "text", "text": "Let me look."},
+                    {"type": "tool_use", "id": "tu_1", "name": "read_file"},
+                ]},
+                {"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": "tu_1", "content": "file contents here"},
+                ]},
+            ],
+        });
+
+        let tool_names: Vec<&str> = vec!["read_file"];
+        let detail = format_request_body_vv(&trace_id, "test", &body, &tool_names);
+        assert!(detail.contains("messages[0] user:"));
+        assert!(detail.contains("messages[1] assistant:"));
+        assert!(detail.contains("tool_use: [read_file]"));
+        assert!(detail.contains("messages[2] user (tool_result: 1 blocks)"));
+    }
+
+    #[test]
+    fn test_format_compact_json_object() {
+        let val = serde_json::json!({"path": "/tmp/test.txt", "offset": 10});
+        let result = format_compact_json(&val);
+        assert!(result.contains("path:"));
+        assert!(result.contains("offset:"));
+    }
+
+    #[test]
+    fn test_format_compact_json_empty() {
+        let val = serde_json::json!(null);
+        let result = format_compact_json(&val);
+        assert_eq!(result, "null");
     }
 }

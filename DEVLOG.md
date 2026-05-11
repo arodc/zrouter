@@ -1,9 +1,20 @@
 # ZRouter Development Log
 
+## 2026-05-12 — Debug logging: human-readable formatted output
+
+- **`src/debug.rs`**: Rewrote debug output format from flat structured tracing fields to formatted human-readable `message` strings with `label: value` tag style and proper indentation hierarchy. No raw JSON output in any mode.
+  - v mode (request): `DEBUG[v] request | model: ... | trace_id: ...` header with indented sub-fields for messages (user/assistant/tool_result counts), system prompt, tools (up to 6 names shown, then `... +N more`), max_tokens, context_size.
+  - vv mode (request): Same header plus `DEBUG[vv] request body` with per-message formatting: role labels, text previews (200 chars max), tool_result block counts with content length, tool_use names lists.
+  - v mode (response): `DEBUG[v] response | model: ... | trace_id: ...` with stop_reason, content_blocks breakdown (text/tool_use counts + names), usage tokens.
+  - vv mode (response): Same header plus `DEBUG[vv] response body` with per-content-block formatting: text with char count, tool_use with name and compact input.
+  - All output goes through `tracing::info!` with `message` field. `trace_id` and `model` remain separate tracing fields for queryability. Uses `debug_level` (not `level`) as tracing field name.
+  - Tools display up to 6 names then `... +N more`. Text content truncated at 200 chars. No raw JSON anywhere.
+  - Replaced old `tool_names_display` with `format_tool_names`, added helpers: `truncate_str`, `content_preview`, `extract_text_from_blocks`, `format_compact_json`, `format_request_body_vv`, `format_response_body_vv`.
+  - Updated all tests to match new internal helpers; added tests for truncation, unicode boundary safety, tool name formatting edge cases, vv-mode body formatting.
+
 ## 2026-05-12 — vv mode: trim tool definitions to names only
 
-- **`src/debug.rs`**: In vv mode, clone the request body value and replace each tool definition with `{"name": "<tool_name>"}` before pretty-printing. This prevents massive `input_schema` objects from flooding logs. Messages, system prompt, and all other fields remain intact.
-- Added test `test_vv_mode_tools_stripped_to_names_only` verifying the trimming logic and that non-tool fields are preserved.
+- Replaced per-tool JSON pretty-printing with name-only display in vv mode. Prevents `input_schema` objects from flooding logs.
 
 ## 2026-05-12 — Debug logging refinements
 
