@@ -22,12 +22,14 @@ format = "json"  # "json" or "text"
 
 # --- Provider definitions ---
 # Each provider is an Anthropic-compatible endpoint
+# provider_type: "anthropic" (default), "deepseek", "zhipu", "kimi", "openai"
 
 [providers.anthropic]
 endpoint = "https://api.anthropic.com"
 api_key_env = "ANTHROPIC_API_KEY"
 connect_timeout_secs = 10
 read_timeout_secs = 300
+# provider_type = "anthropic"
 
 [providers.openrouter]
 endpoint = "https://openrouter.ai/api"
@@ -76,9 +78,12 @@ steps = [
 # --- Fallback policy ---
 
 [fallback]
-trigger_codes = [429, 500, 502, 503, 504, 529]
-max_retries = 3
-initial_delay_ms = 500
-max_delay_ms = 8000
-circuit_breaker_threshold = 5
-circuit_breaker_cooldown_secs = 60
+step_max_retries = 2           # max retries per step (2 = 3 attempts total)
+initial_delay_ms = 500         # initial retry delay
+max_delay_ms = 8000            # max retry delay cap
+# Global error classification overrides (empty = use provider_type defaults)
+# retryable_codes = [429, 500, 502, 503, 504, 529]
+# retryable_error_types = []
+# non_retryable_codes = [400, 401, 403, 404]
+# non_retryable_error_types = []
+non_retryable_cooldown_secs = 3600  # cooldown for non-retryable failures

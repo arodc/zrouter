@@ -1,54 +1,20 @@
 # ZRouter Development Log
 
-## 2026-04-25 — Ensure all active connection interruptions are logged at info/warn level
+## 2026-05-12 — Fallback mechanism refactoring: HealthState + probe + multi-provider error mapping
 
-- Peek timeout (30s no data): `debug` → `info`
-- Connection closed (hyper error): `debug` → `info`
-- Auth failure (401): no log → `warn`
-- TLS handshake failure and protocol mismatch: already `warn` ✓
-
-## 2026-04-25 — Accept Authorization Bearer header for API key auth
-
-- Some clients (e.g. Claude Code) send API key via `Authorization: Bearer <key>` instead of `x-api-key`
-- Server now checks both headers: `x-api-key` first, then `Authorization: Bearer` as fallback
-- Fixes 401 authentication errors from clients that don't use `x-api-key`
-
-## 2026-04-25 — Auto-detect HTTP vs TLS protocol on same port
-
-- `server.rs`: use `TcpStream::peek` to read first byte without consuming it
-- TLS ClientHello starts with 0x16, HTTP starts with ASCII letters
-- When TLS is configured, the port now accepts both HTTPS and plain HTTP connections
-- Logs `Plaintext HTTP on TLS port` at INFO level when HTTP is detected on a TLS-enabled port
-- Fixes `InvalidContentType` handshake error when clients connect with `http://` to HTTPS port
-
-## 2026-04-25 — Fix fallback logging: wrong model field and noisy first-attempt log
-
-- `model=None` was showing `step.model` (optional model override in route step) instead of the actual request model
-- `FallbackExecutor` now receives `original_model` from the request and uses it in log messages
-- "Attempting request" log removed from the happy path; only logs on retry (`attempt > 0`) or fallback (`step_idx > 0`)
-
-## 2026-04-25 — Fix self-signed cert rejected by AI tools
-
-- Root cause: self-signed dev cert regenerated on every restart, never persisted, untrusted by AI tool TLS stacks
-- `tls.rs`: dev cert now saved to `{config_dir}/zrouter-dev-cert.pem` and reused across restarts
-- Key file saved with 0600 permissions (Unix only)
-- Log message shows cert file path for trust store import
-- `server.rs`: post-handshake connection errors demoted from ERROR to DEBUG (client disconnects are benign noise)
-
-## 2026-04-25 — Adjust log timestamp to local timezone, seconds precision
-
-- Custom `LocalTimer` implementing `FormatTime` trait, format `MM/DD/HH:MM:SS`
-- Compute UTC offset once at startup via `OffsetDateTime::now_local()`, cached in `OnceLock`
-- Added `time` crate (already transitive dep via tracing-subscriber) with `local-offset` + `formatting` features
-- Applied to both JSON and text log formats
-
-## 2026-04-25 — Add HTTPS and HTTP/2 server support
-
-- New `src/tls.rs` module: builds server-side TLS config from PEM cert/key files or auto-generates self-signed dev certificate via `rcgen`
-- Server now uses `hyper_util::server::conn::auto::Builder` instead of `http1::Builder`, supporting both HTTP/1.1 and HTTP/2 (via ALPN `h2, http/1.1`)
-- Config: added `tls`, `cert_file`, `key_file` fields to `[server]` section
-- Dependencies: added `rustls-pemfile`, `rcgen`, `tokio-rustls`
-- Verified: plain HTTP, HTTPS with self-signed cert, HTTP/2 negotiation
+- **New `src/error_map.rs`**: Multi-provider error code classification with `ProviderType` enum (Anthropic, Deepseek, Zhipu, Kimi, OpenAi) and `ErrorClassifier` with per-provider presets. Classifies HTTP responses into Success/Retryable/NonRetryable/Fatal. Supports global config overrides.
+- **New `src/probe.rs`**: Background probe loop that periodically checks unhealthy providers. Uses `tokio::select!` with timed+notify dual-wait to avoid TOCTOU race. Providers recover via probe success, with exponential backoff on probe failure.
+- **`src/config.rs`**: Breaking config changes — removed `trigger_codes`, `circuit_breaker_threshold`, `circuit_breaker_cooldown_secs`. Renamed `max_retries` to `step_max_retries` (default 2). Added `provider_type` to ProviderConfig, `retryable_codes`, `retryable_error_types`, `non_retryable_codes`, `non_retryable_error_types`, `non_retryable_cooldown_secs` to FallbackConfig.
+- **`src/provider.rs`**: Replaced three-state circuit breaker (Closed/Open/HalfOpen) with `HealthState` model (Healthy/Unhealthy). `FailureReason` enum distinguishes Retryable vs NonRetryable failures with different backoff strategies. `Registry` gains probe support methods: `probe_candidates()`, `min_next_probe()`, `notify_probe()`.
+- **`src/fallback.rs`**: Core rewrite — `AttemptOutcome` now has 4 variants (Success/RetryableFailure/NonRetryableFailure/Fatal). Unhealthy providers skipped until probe time. Same-step retries with exponential backoff. NonRetryable failures trigger immediate provider marking. Fatal aborts entire request.
+- **`src/server.rs`**: `upstream_attempt` uses `ErrorClassifier` per provider type. `read_body_string` capped at 20MB. HTTP client built once in main and shared between server and probe loop.
+- **Post-review fixes**: `find_matching_rule` non-JSON body now correctly skips rules with `error_type_filter` (RED-1). `notify_probe()` added after RetryableFailure exhaustion (RED-2). `execute()` now uses fresh `epoch_secs()` per step check instead of cached `now`. Probe timeout `.max(10)` clarified with comment.
+- **`src/main.rs`**: Creates `Notify`, injects into `Registry`, builds shared `HttpClient`, spawns probe loop task. `AppState.providers` is now `Arc<Registry>`.
 
 ### Earlier logs (summarized)
-Fixed Zhipu provider endpoint + TLS compatibility, added HTTP/2 to upstream client. Initial implementation: full routing daemon with circuit breaker, fallback, auth, logging. API research and code review.
+
+2026-04-25: Improved connection interruption logging levels, added Authorization Bearer header support, auto-detect HTTP vs TLS protocol on same port, fixed fallback logging model field, fixed self-signed cert persistence, adjusted log timestamps to local timezone.
+
+2026-04-25: Added HTTPS and HTTP/2 server support with TLS module, ALPN negotiation, rcgen self-signed certs.
+
+Pre-2026-04-25: Initial implementation with circuit breaker, fallback, auth, logging. Fixed Zhipu endpoint + TLS compatibility, added HTTP/2 to upstream client. API research and code review.

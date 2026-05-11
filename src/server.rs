@@ -9,7 +9,8 @@ use hyper_util::rt::TokioExecutor;
 use tokio::sync::broadcast;
 
 use crate::auth;
-use crate::fallback::{self, AttemptOutcome, AttemptParams, FallbackExecutor};
+use crate::error_map::{Classification, ErrorClassifier};
+use crate::fallback::{AttemptOutcome, AttemptParams, FallbackExecutor};
 use crate::provider::Registry;
 use crate::proxy;
 use crate::router;
@@ -19,12 +20,14 @@ type HttpClient = hyper_util::client::legacy::Client<
     String,
 >;
 
+const MAX_RESPONSE_BODY: usize = 20 * 1024 * 1024; // 20MB
+
 pub struct AppState {
     pub config: crate::config::Config,
-    pub providers: Registry,
+    pub providers: Arc<Registry>,
 }
 
-fn build_http_client() -> HttpClient {
+pub(crate) fn build_http_client() -> HttpClient {
     // Custom TLS config: some upstreams (e.g. open.bigmodel.cn) require
     // explicit TLS 1.2+1.3 version negotiation — the default connector
     // may not offer TLS 1.2, causing a "ProtocolVersion" fatal alert.
@@ -53,9 +56,9 @@ pub async fn serve(
     listener: tokio::net::TcpListener,
     state: Arc<AppState>,
     tls_acceptor: Option<tokio_rustls::TlsAcceptor>,
+    client: Arc<HttpClient>,
     shutdown_tx: broadcast::Sender<()>,
 ) {
-    let client = Arc::new(build_http_client());
     let mut shutdown_rx = shutdown_tx.subscribe();
 
     loop {
@@ -217,24 +220,27 @@ async fn handle_request(
         }
     };
 
+    let fallback_config = &state.config.fallback;
+
     let executor = FallbackExecutor {
         route,
         registry: &state.providers,
-        fallback_config: &state.config.fallback,
+        fallback_config,
         original_model: model.clone(),
     };
 
-    let trigger_codes = state.config.fallback.trigger_codes.clone();
+    let fc = fallback_config.clone();
 
     let result = executor
         .execute(
             |params, body| {
                 let client = client.clone();
                 let headers = original_headers.clone();
-                let trigger_codes = trigger_codes.clone();
+                let fc = fc.clone();
                 let body = proxy::replace_model(&body, params.step_model.as_deref());
                 async move {
-                    upstream_attempt(&client, params, &headers, body, &trigger_codes).await
+                    let classifier = ErrorClassifier::from_config(&fc, params.provider_type);
+                    upstream_attempt(&client, params, &headers, body, &classifier).await
                 }
             },
             body_bytes,
@@ -275,13 +281,13 @@ async fn upstream_attempt(
     params: AttemptParams,
     original_headers: &http::HeaderMap,
     body: Bytes,
-    trigger_codes: &[u16],
+    classifier: &ErrorClassifier,
 ) -> AttemptOutcome {
     let url = format!("{}/v1/messages", params.endpoint);
     let uri: Uri = match url.parse() {
         Ok(u) => u,
         Err(e) => {
-            return AttemptOutcome::Retryable {
+            return AttemptOutcome::Fatal {
                 status: 500,
                 body: format!("Invalid upstream URL: {}", e),
             };
@@ -305,7 +311,7 @@ async fn upstream_attempt(
     let req = match req_builder.body(body_str) {
         Ok(r) => r,
         Err(e) => {
-            return AttemptOutcome::Retryable {
+            return AttemptOutcome::Fatal {
                 status: 500,
                 body: format!("Failed to build request: {}", e),
             };
@@ -321,42 +327,50 @@ async fn upstream_attempt(
         Ok(Ok(resp)) => resp,
         Ok(Err(e)) => {
             tracing::warn!(error = %e, "Upstream connection error");
-            return AttemptOutcome::Retryable {
+            return AttemptOutcome::RetryableFailure {
                 status: 502,
                 body: format!("Upstream connection error: {}", e),
+                error_type: None,
+                description: None,
             };
         }
         Err(_) => {
-            return AttemptOutcome::Retryable {
+            return AttemptOutcome::RetryableFailure {
                 status: 504,
                 body: "Upstream connection timeout".to_string(),
+                error_type: None,
+                description: None,
             };
         }
     };
 
     let status = response.status().as_u16();
-    let is_success = response.status().is_success();
-    let is_trigger = fallback::is_trigger_code(status, trigger_codes);
     let body_text = read_body_string(response.into_body())
         .await
         .unwrap_or_default();
 
-    if is_trigger {
-        AttemptOutcome::Retryable {
-            status,
-            body: body_text,
-        }
-    } else if is_success {
-        AttemptOutcome::Success {
+    match classifier.classify(status, &body_text) {
+        Classification::Success => AttemptOutcome::Success {
             provider_name: params.provider_name,
             status,
             body: body_text,
-        }
-    } else {
-        AttemptOutcome::Fatal {
+        },
+        Classification::Retryable { error_type, description } => AttemptOutcome::RetryableFailure {
             status,
             body: body_text,
-        }
+            error_type,
+            description: description.map(|s| s.to_string()),
+        },
+        Classification::NonRetryable { error_type, description } => AttemptOutcome::NonRetryableFailure {
+            status,
+            body: body_text,
+            error_type,
+            description: description.map(|s| s.to_string()),
+        },
+        Classification::Fatal => AttemptOutcome::Fatal {
+            status,
+            body: body_text,
+        },
     }
 }
 
@@ -395,6 +409,6 @@ async fn read_body(
 async fn read_body_string(
     body: Incoming,
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-    let bytes = read_body(body, 50 * 1024 * 1024).await?;
+    let bytes = read_body(body, MAX_RESPONSE_BODY).await?;
     Ok(String::from_utf8_lossy(&bytes).to_string())
 }

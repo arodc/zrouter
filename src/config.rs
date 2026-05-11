@@ -53,6 +53,8 @@ pub struct ProviderConfig {
     pub connect_timeout_secs: u64,
     #[serde(default = "default_read_timeout")]
     pub read_timeout_secs: u64,
+    #[serde(default = "default_provider_type")]
+    pub provider_type: String,
 }
 
 fn default_connect_timeout() -> u64 {
@@ -61,6 +63,10 @@ fn default_connect_timeout() -> u64 {
 
 fn default_read_timeout() -> u64 {
     300
+}
+
+fn default_provider_type() -> String {
+    "anthropic".to_string()
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -77,26 +83,26 @@ pub struct RouteStep {
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct FallbackConfig {
-    #[serde(default = "default_trigger_codes")]
-    pub trigger_codes: Vec<u16>,
-    #[serde(default = "default_max_retries")]
-    pub max_retries: u32,
+    #[serde(default = "default_step_max_retries")]
+    pub step_max_retries: u32,
     #[serde(default = "default_initial_delay")]
     pub initial_delay_ms: u64,
     #[serde(default = "default_max_delay")]
     pub max_delay_ms: u64,
-    #[serde(default = "default_cb_threshold")]
-    pub circuit_breaker_threshold: u32,
-    #[serde(default = "default_cb_cooldown")]
-    pub circuit_breaker_cooldown_secs: u64,
+    #[serde(default)]
+    pub retryable_codes: Vec<u16>,
+    #[serde(default)]
+    pub retryable_error_types: Vec<String>,
+    #[serde(default)]
+    pub non_retryable_codes: Vec<u16>,
+    #[serde(default)]
+    pub non_retryable_error_types: Vec<String>,
+    #[serde(default = "default_non_retryable_cooldown")]
+    pub non_retryable_cooldown_secs: u64,
 }
 
-fn default_trigger_codes() -> Vec<u16> {
-    vec![429, 500, 502, 503, 504, 529]
-}
-
-fn default_max_retries() -> u32 {
-    3
+fn default_step_max_retries() -> u32 {
+    2
 }
 
 fn default_initial_delay() -> u64 {
@@ -107,23 +113,21 @@ fn default_max_delay() -> u64 {
     8000
 }
 
-fn default_cb_threshold() -> u32 {
-    5
-}
-
-fn default_cb_cooldown() -> u64 {
-    60
+fn default_non_retryable_cooldown() -> u64 {
+    3600
 }
 
 impl Default for FallbackConfig {
     fn default() -> Self {
         Self {
-            trigger_codes: default_trigger_codes(),
-            max_retries: default_max_retries(),
+            step_max_retries: default_step_max_retries(),
             initial_delay_ms: default_initial_delay(),
             max_delay_ms: default_max_delay(),
-            circuit_breaker_threshold: default_cb_threshold(),
-            circuit_breaker_cooldown_secs: default_cb_cooldown(),
+            retryable_codes: Vec::new(),
+            retryable_error_types: Vec::new(),
+            non_retryable_codes: Vec::new(),
+            non_retryable_error_types: Vec::new(),
+            non_retryable_cooldown_secs: default_non_retryable_cooldown(),
         }
     }
 }
