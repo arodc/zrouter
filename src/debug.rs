@@ -570,14 +570,17 @@ fn format_multiline(label: &str, text: &str) -> String {
 
 /// Format a tool name list with wrapping: `per_line` names per line.
 /// First line: `tools: {count} [Name1, Name2, ...]`
-/// Continuation lines indented to align after `tools: `.
+/// Continuation lines indented to align with the first tool name after `[`.
 fn format_tool_list(names: &[&str], per_line: usize) -> String {
     if names.is_empty() {
         return format!("{UUID_INDENT}tools: 0 []");
     }
     let count = names.len();
-    let indent = format!("{}{}", UUID_INDENT, " ".repeat(7)); // "tools: " = 7 chars
-    let mut result = format!("{UUID_INDENT}tools: {} [", count);
+    let prefix = format!("tools: {} [", count);
+    // Continuation indent = UUID_INDENT + spaces matching prefix width, so
+    // tool names on wrapped lines align with the first tool name on line 1.
+    let indent = format!("{}{}", UUID_INDENT, " ".repeat(prefix.len()));
+    let mut result = format!("{UUID_INDENT}{}", prefix);
     for (i, name) in names.iter().enumerate() {
         if i > 0 && i % per_line == 0 {
             // Wrap to new line
@@ -1140,6 +1143,11 @@ data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_d
         assert!(lines[0].contains("A, B, C, D, E, F, G, H"));
         assert!(lines[1].contains("I, J"));
         assert!(lines[1].ends_with(']'));
+        // Continuation line tool names must align with first tool name on line 1.
+        // "tools: 10 [" = 11 chars, so indent = UUID_INDENT(19) + 11 = 30 spaces.
+        let first_tool_col = lines[0].find('A').unwrap();
+        let cont_tool_col = lines[1].find('I').unwrap();
+        assert_eq!(first_tool_col, cont_tool_col);
     }
 
     #[test]

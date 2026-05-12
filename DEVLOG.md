@@ -1,5 +1,9 @@
 # ZRouter Development Log
 
+## 2026-05-12 — Fix tool list continuation line alignment
+
+- **`src/debug.rs`**: Fixed `format_tool_list` continuation indent. Previously used a fixed `"tools: ".len()` (7 chars), which aligned wrapped lines after `tools:` instead of after the opening `[`. Now computes the indent from `format!("tools: {} [", count).len()`, so continuation tool names align with the first tool name on line 1. Updated `test_format_tool_list_wraps` to assert column alignment.
+
 ## 2026-05-12 — Debug output: model header, multiline content, tool wrapping, indented separator
 
 - **`src/debug.rs`**: Four changes:
