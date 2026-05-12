@@ -1,6 +1,13 @@
 # ZRouter Development Log
 
-## 2026-05-12 — Indent +10, bright yellow ANSI via \u{001b}
+## 2026-05-12 — Debug output: +10 indent, drop color, full tool names, no body headers, 40-dash sep
+
+- **`src/debug.rs`**: Five changes:
+  1. All content indentation increased by 10 chars (UUID_INDENT from 9→19).
+  2. Removed ANSI yellow coloring on UUID (ANSI_YELLOW/ANSI_RESET constants deleted).
+  3. Removed tool name truncation (`format_tool_names` deleted, `TOOL_NAMES_SHOWN` deleted); all tool names now shown via `.join(", ")`.
+  4. Removed `DEBUG[vv] request body` / `DEBUG[vv] response body` header lines from vv-mode detail output; content starts directly.
+  5. VV_SEPARATOR widened from 3 to 40 dashes.
 
 - **`src/debug.rs`**: `UUID_INDENT` increased from 9 to 19 spaces. Changed ANSI yellow from `\x1b[33m` to `\u{001b}[93m` (bright yellow via Unicode escape — tracing text formatter treats `\x1b` differently). Fixed 3 `indent_after` tests for new indent width.
 

@@ -3,17 +3,9 @@ use std::fmt::Display;
 use crate::config::DebugLevel;
 
 const TEXT_PREVIEW_LEN: usize = 200;
-const TOOL_NAMES_SHOWN: usize = 6;
 
 /// Separator between v-mode summary and vv-mode detail in a merged log line.
-const VV_SEPARATOR: &str = "\n---\n";
-
-/// ANSI escape codes for terminal coloring.
-/// Uses `\u{001b}` syntax (ESC byte 0x1B) — `\x1b` is treated differently
-/// by tracing's text formatter and renders as literal text.
-/// Bright yellow (93) instead of dim yellow (33) for better visibility.
-const ANSI_YELLOW: &str = "\u{001b}[93m";
-const ANSI_RESET: &str = "\u{001b}[0m";
+const VV_SEPARATOR: &str = "\n----------------------------------------\n";
 
 /// Indent width: UUID first dash position (9) + 10 extra alignment = 19.
 const UUID_INDENT: &str = "                   ";
@@ -124,7 +116,7 @@ pub fn log_request(trace_id: &uuid::Uuid, model: &str, level: &DebugLevel, body:
     };
 
     let msg = format!(
-        "{ANSI_YELLOW}{uuid} req{ANSI_RESET} DEBUG[{level_tag}] request\n\
+        "{uuid} req DEBUG[{level_tag}] request\n\
          {UUID_INDENT}messages: {msg_count}\n\
          {user_line}\n\
          {assistant_line}\n\
@@ -141,7 +133,7 @@ pub fn log_request(trace_id: &uuid::Uuid, model: &str, level: &DebugLevel, body:
         tool_result_line = indent_after("messages:", "tool_result:", &tool_result_count),
         system_line = system_line,
         tool_count = tool_count,
-        tool_names = format_tool_names(&tool_names),
+        tool_names = tool_names.join(", "),
         max_tokens_line = indent_after("tools:", "max_tokens:", &max_tokens),
         context_size_line = indent_after("tools:", "context_size:", &format!("~{} chars", content_chars)),
     );
@@ -177,7 +169,7 @@ pub fn log_response(trace_id: &uuid::Uuid, model: &str, level: &DebugLevel, body
             debug_level = "v",
             body_len = 0usize,
             parse_result = "empty body",
-            "{ANSI_YELLOW}{trace_id} ack{ANSI_RESET} DEBUG[v] response\n\
+            "{trace_id} ack DEBUG[v] response\n\
              {UUID_INDENT}stop_reason: empty\n\
              {UUID_INDENT}content_blocks: 0\n\
              {UUID_INDENT}usage: not available",
@@ -388,7 +380,7 @@ fn log_response_parsed(
     // Build v-mode summary with colon-aligned indentation
     let mut lines = vec![
         format!(
-            "{ANSI_YELLOW}{trace_id} ack{ANSI_RESET} DEBUG[{level_tag}] response",
+            "{trace_id} ack DEBUG[{level_tag}] response",
             trace_id = trace_id,
             level_tag = level_tag,
         ),
@@ -402,7 +394,7 @@ fn log_response_parsed(
             lines.push(indent_after("content_blocks:", "text:", &text_count));
         }
         if tool_use_count > 0 {
-            let names_str = format_tool_names(&tool_call_names);
+            let names_str = tool_call_names.join(", ");
             lines.push(indent_after(
                 "content_blocks:",
                 "tool_use:",
@@ -435,15 +427,12 @@ fn log_response_parsed(
 // ---------------------------------------------------------------------------
 
 fn format_request_body_vv(
-    trace_id: &uuid::Uuid,
+    _trace_id: &uuid::Uuid,
     _model: &str,
     val: &serde_json::Value,
     tool_names: &[&str],
 ) -> String {
-    let mut lines = vec![format!(
-        "{ANSI_YELLOW}{trace_id} req{ANSI_RESET} DEBUG[vv] request body",
-        trace_id = trace_id,
-    )];
+    let mut lines: Vec<String> = Vec::new();
 
     // Messages
     if let Some(msgs) = val.get("messages").and_then(|m| m.as_array()) {
@@ -533,7 +522,7 @@ fn format_request_body_vv(
     if !tool_names.is_empty() {
         lines.push(format!(
             "{UUID_INDENT}tools: [{}]",
-            format_tool_names(tool_names)
+            tool_names.join(", ")
         ));
     }
 
@@ -546,13 +535,10 @@ fn format_request_body_vv(
 }
 
 fn format_response_body_vv(
-    trace_id: &uuid::Uuid,
+    _trace_id: &uuid::Uuid,
     content_blocks: Option<&Vec<serde_json::Value>>,
 ) -> String {
-    let mut lines = vec![format!(
-        "{ANSI_YELLOW}{trace_id} ack{ANSI_RESET} DEBUG[vv] response body",
-        trace_id = trace_id,
-    )];
+    let mut lines: Vec<String> = Vec::new();
 
     if let Some(blocks) = content_blocks {
         for (i, block) in blocks.iter().enumerate() {
@@ -597,15 +583,6 @@ fn format_response_body_vv(
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Format tool names for display: up to TOOL_NAMES_SHOWN, then "... +N more".
-fn format_tool_names(names: &[&str]) -> String {
-    if names.len() <= TOOL_NAMES_SHOWN {
-        names.join(", ")
-    } else {
-        let shown = &names[..TOOL_NAMES_SHOWN];
-        format!("{}, ... +{} more", shown.join(", "), names.len() - TOOL_NAMES_SHOWN)
-    }
-}
 
 /// Truncate string to max_len chars with "..." suffix if needed.
 fn truncate_str(s: &str, max_len: usize) -> &str {
@@ -1089,33 +1066,6 @@ data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_d
             {"type": "text", "text": "output line 2"},
         ]);
         assert_eq!(block_content_len(Some(&val)), 26);
-    }
-
-    #[test]
-    fn test_format_tool_names_few() {
-        let names: Vec<&str> = vec!["read_file", "write_file"];
-        assert_eq!(format_tool_names(&names), "read_file, write_file");
-    }
-
-    #[test]
-    fn test_format_tool_names_exactly_six() {
-        let names: Vec<&str> = vec!["a", "b", "c", "d", "e", "f"];
-        assert_eq!(format_tool_names(&names), "a, b, c, d, e, f");
-    }
-
-    #[test]
-    fn test_format_tool_names_seven() {
-        let names: Vec<&str> = vec!["a", "b", "c", "d", "e", "f", "g"];
-        let result = format_tool_names(&names);
-        assert_eq!(result, "a, b, c, d, e, f, ... +1 more");
-    }
-
-    #[test]
-    fn test_format_tool_names_many() {
-        let names: Vec<&str> = vec!["a", "b", "c", "d", "e", "f", "g", "h", "i", "j"];
-        let result = format_tool_names(&names);
-        assert!(result.contains("a, b, c, d, e, f"));
-        assert!(result.contains("+4 more"));
     }
 
     #[test]
