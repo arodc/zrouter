@@ -5,7 +5,8 @@ use crate::config::DebugLevel;
 const TEXT_PREVIEW_LEN: usize = 200;
 
 /// Separator between v-mode summary and vv-mode detail in a merged log line.
-const VV_SEPARATOR: &str = "\n----------------------------------------\n";
+/// Indented with UUID_INDENT to align with content.
+const VV_SEPARATOR_DASHES: &str = "----------------------------------------";
 
 /// Indent width: UUID first dash position (9) + 10 extra alignment = 19.
 const UUID_INDENT: &str = "                   ";
@@ -38,17 +39,12 @@ pub fn log_request(trace_id: &uuid::Uuid, model: &str, level: &DebugLevel, body:
         Ok(v) => v,
         Err(e) => {
             tracing::warn!(
-                trace_id = %trace_id,
-                model = model,
-                error = %e,
-                "{} req DEBUG: unable to parse request body",
-                trace_id
+                "{} req [{}]: unable to parse request body: {}",
+                trace_id, model, e
             );
             return;
         }
     };
-
-    let level_tag = if level == &DebugLevel::Vv { "vv" } else { "v" };
 
     // Extract message counts by role
     let messages = val.get("messages").and_then(|m| m.as_array());
@@ -89,7 +85,6 @@ pub fn log_request(trace_id: &uuid::Uuid, model: &str, level: &DebugLevel, body:
 
     // Tool definitions
     let tools = val.get("tools").and_then(|t| t.as_array());
-    let tool_count = tools.map_or(0, |a| a.len());
     let tool_names: Vec<&str> = tools
         .into_iter()
         .flatten()
@@ -116,24 +111,23 @@ pub fn log_request(trace_id: &uuid::Uuid, model: &str, level: &DebugLevel, body:
     };
 
     let msg = format!(
-        "{uuid} req DEBUG[{level_tag}] request\n\
+        "{uuid} req [{model}]\n\
          {UUID_INDENT}messages: {msg_count}\n\
          {user_line}\n\
          {assistant_line}\n\
          {tool_result_line}\n\
          {UUID_INDENT}system: {system_line}\n\
-         {UUID_INDENT}tools: {tool_count} [{tool_names}]\n\
+         {tools_line}\n\
          {max_tokens_line}\n\
          {context_size_line}",
         uuid = trace_id,
-        level_tag = level_tag,
+        model = model,
         msg_count = msg_count,
         user_line = indent_after("messages:", "user:", &user_count),
         assistant_line = indent_after("messages:", "assistant:", &assistant_count),
         tool_result_line = indent_after("messages:", "tool_result:", &tool_result_count),
         system_line = system_line,
-        tool_count = tool_count,
-        tool_names = tool_names.join(", "),
+        tools_line = format_tool_list(&tool_names, 8),
         max_tokens_line = indent_after("tools:", "max_tokens:", &max_tokens),
         context_size_line = indent_after("tools:", "context_size:", &format!("~{} chars", content_chars)),
     );
@@ -141,18 +135,12 @@ pub fn log_request(trace_id: &uuid::Uuid, model: &str, level: &DebugLevel, body:
     // vv mode: append detailed body to same message
     let msg = if level == &DebugLevel::Vv {
         let detail = format_request_body_vv(trace_id, model, &val, &tool_names);
-        format!("{}{}{}", msg, VV_SEPARATOR, detail)
+        format!("{}\n{}{}\n{}", msg, UUID_INDENT, VV_SEPARATOR_DASHES, detail)
     } else {
         msg
     };
 
-    tracing::info!(
-        trace_id = %trace_id,
-        model = model,
-        debug_level = level_tag,
-        "{}",
-        msg,
-    );
+    tracing::info!("{}", msg);
 }
 
 /// Log debug information about an Anthropic Messages API response.
@@ -164,16 +152,12 @@ pub fn log_response(trace_id: &uuid::Uuid, model: &str, level: &DebugLevel, body
 
     if body.is_empty() || body.trim().is_empty() {
         tracing::info!(
-            trace_id = %trace_id,
-            model = model,
-            debug_level = "v",
-            body_len = 0usize,
-            parse_result = "empty body",
-            "{trace_id} ack DEBUG[v] response\n\
+            "{trace_id} ack [{model}]\n\
              {UUID_INDENT}stop_reason: empty\n\
              {UUID_INDENT}content_blocks: 0\n\
              {UUID_INDENT}usage: not available",
             trace_id = trace_id,
+            model = model,
         );
         return;
     }
@@ -192,15 +176,8 @@ pub fn log_response(trace_id: &uuid::Uuid, model: &str, level: &DebugLevel, body
             }
             // Final fallback: warn with body preview and specific error
             tracing::warn!(
-                trace_id = %trace_id,
-                model = model,
-                body_len = body.len(),
-                body_preview = %&body[..body.len().min(80)],
-                json_error = %json_err,
-                has_data_prefix = body.contains("data:"),
-                parse_result = "parse failed",
-                "{} ack DEBUG: unable to parse response body",
-                trace_id
+                "{} ack [{}]: unable to parse response body ({} bytes): {}",
+                trace_id, model, body.len(), json_err
             );
             return;
         }
@@ -375,14 +352,12 @@ fn log_response_parsed(
         (None, None) => "not available".to_string(),
     };
 
-    let level_tag = if level == &DebugLevel::Vv { "vv" } else { "v" };
-
     // Build v-mode summary with colon-aligned indentation
     let mut lines = vec![
         format!(
-            "{trace_id} ack DEBUG[{level_tag}] response",
+            "{trace_id} ack [{model}]",
             trace_id = trace_id,
-            level_tag = level_tag,
+            model = model,
         ),
         format!("{UUID_INDENT}stop_reason: {stop_reason}"),
         format!("{UUID_INDENT}content_blocks: {block_count}"),
@@ -410,16 +385,10 @@ fn log_response_parsed(
     // vv mode: append detailed content blocks to same message
     if level == &DebugLevel::Vv {
         let detail = format_response_body_vv(trace_id, content_blocks);
-        msg = format!("{}{}{}", msg, VV_SEPARATOR, detail);
+        msg = format!("{}\n{}{}\n{}", msg, UUID_INDENT, VV_SEPARATOR_DASHES, detail);
     }
 
-    tracing::info!(
-        trace_id = %trace_id,
-        model = model,
-        debug_level = level_tag,
-        "{}",
-        msg,
-    );
+    tracing::info!("{}", msg);
 }
 
 // ---------------------------------------------------------------------------
@@ -461,8 +430,9 @@ fn format_request_body_vv(
                             continue;
                         }
                     }
-                    let preview = content_preview(content);
-                    lines.push(format!("{UUID_INDENT}messages[{}] user: {}", i, preview));
+                    let label = format!("{UUID_INDENT}messages[{}] user:", i);
+                    let text = content_text(content);
+                    lines.push(format_multiline(&label, &text));
                 }
                 "assistant" => {
                     // Check for tool_use blocks
@@ -481,22 +451,22 @@ fn format_request_body_vv(
                                     tool_uses.join(", ")
                                 ));
                             } else {
-                                lines.push(format!(
-                                    "{UUID_INDENT}messages[{}] assistant: {} (tool_use: [{}])",
-                                    i,
-                                    truncate_str(&text_preview, TEXT_PREVIEW_LEN),
-                                    tool_uses.join(", ")
-                                ));
+                                let label = format!("{UUID_INDENT}messages[{}] assistant:", i);
+                                let mut ml = format_multiline(&label, &text_preview);
+                                ml.push_str(&format!(" (tool_use: [{}])", tool_uses.join(", ")));
+                                lines.push(ml);
                             }
                             continue;
                         }
                     }
-                    let preview = content_preview(content);
-                    lines.push(format!("{UUID_INDENT}messages[{}] assistant: {}", i, preview));
+                    let label = format!("{UUID_INDENT}messages[{}] assistant:", i);
+                    let text = content_text(content);
+                    lines.push(format_multiline(&label, &text));
                 }
                 _ => {
-                    let preview = content_preview(content);
-                    lines.push(format!("{UUID_INDENT}messages[{}] {}: {}", i, role, preview));
+                    let label = format!("{UUID_INDENT}messages[{}] {}:", i, role);
+                    let text = content_text(content);
+                    lines.push(format_multiline(&label, &text));
                 }
             }
         }
@@ -514,16 +484,13 @@ fn format_request_body_vv(
             _ => String::new(),
         };
         if !sys_text.is_empty() {
-            lines.push(format!("{UUID_INDENT}system: {:?}", truncate_str(&sys_text, TEXT_PREVIEW_LEN)));
+            lines.push(format_multiline(&format!("{UUID_INDENT}system:"), &sys_text));
         }
     }
 
     // Tools
     if !tool_names.is_empty() {
-        lines.push(format!(
-            "{UUID_INDENT}tools: [{}]",
-            tool_names.join(", ")
-        ));
+        lines.push(format_tool_list(tool_names, 8));
     }
 
     // max_tokens
@@ -583,6 +550,47 @@ fn format_response_body_vv(
 // Helpers
 // ---------------------------------------------------------------------------
 
+/// Format text that may contain newlines, rendering them as actual newlines
+/// with continuation lines indented to align after the label's colon-space.
+/// If the text has no newlines, returns `"{label} {text}"`.
+/// Each line is truncated to `TEXT_PREVIEW_LEN` chars.
+fn format_multiline(label: &str, text: &str) -> String {
+    if !text.contains('\n') {
+        return format!("{} {}", label, truncate_str(text, TEXT_PREVIEW_LEN));
+    }
+    let indent_width = label.len() + 1; // after colon+space
+    let indent = " ".repeat(indent_width);
+    let lines: Vec<&str> = text.split('\n').collect();
+    let mut result = format!("{}\n{}", label, truncate_str(lines[0], TEXT_PREVIEW_LEN));
+    for line in &lines[1..] {
+        result.push_str(&format!("\n{}{}", indent, truncate_str(line, TEXT_PREVIEW_LEN)));
+    }
+    result
+}
+
+/// Format a tool name list with wrapping: `per_line` names per line.
+/// First line: `tools: {count} [Name1, Name2, ...]`
+/// Continuation lines indented to align after `tools: `.
+fn format_tool_list(names: &[&str], per_line: usize) -> String {
+    if names.is_empty() {
+        return format!("{UUID_INDENT}tools: 0 []");
+    }
+    let count = names.len();
+    let indent = format!("{}{}", UUID_INDENT, " ".repeat(7)); // "tools: " = 7 chars
+    let mut result = format!("{UUID_INDENT}tools: {} [", count);
+    for (i, name) in names.iter().enumerate() {
+        if i > 0 && i % per_line == 0 {
+            // Wrap to new line
+            result.push_str("\n");
+            result.push_str(&indent);
+        } else if i > 0 {
+            result.push_str(", ");
+        }
+        result.push_str(name);
+    }
+    result.push(']');
+    result
+}
 
 /// Truncate string to max_len chars with "..." suffix if needed.
 fn truncate_str(s: &str, max_len: usize) -> &str {
@@ -599,21 +607,13 @@ fn truncate_str(s: &str, max_len: usize) -> &str {
     }
 }
 
-/// Get a text preview from a content field (string or array).
-fn content_preview(content: Option<&serde_json::Value>) -> String {
+/// Extract plain text from a content field (string or array of blocks).
+/// Returns empty string if absent or non-text.
+fn content_text(content: Option<&serde_json::Value>) -> String {
     match content {
-        Some(serde_json::Value::String(s)) => {
-            format!("{:?}", truncate_str(s, TEXT_PREVIEW_LEN))
-        }
-        Some(serde_json::Value::Array(arr)) => {
-            let text = extract_text_from_blocks(arr);
-            if text.is_empty() {
-                "[blocks]".to_string()
-            } else {
-                format!("{:?}", truncate_str(&text, TEXT_PREVIEW_LEN))
-            }
-        }
-        _ => "absent".to_string(),
+        Some(serde_json::Value::String(s)) => s.clone(),
+        Some(serde_json::Value::Array(arr)) => extract_text_from_blocks(arr),
+        _ => String::new(),
     }
 }
 
@@ -1093,6 +1093,56 @@ data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_d
     }
 
     #[test]
+    fn test_format_multiline_no_newlines() {
+        let result = format_multiline("label:", "hello world");
+        assert_eq!(result, "label: hello world");
+    }
+
+    #[test]
+    fn test_format_multiline_with_newlines() {
+        let result = format_multiline("label:", "line1\nline2\nline3");
+        assert_eq!(result, "label:\nline1\n       line2\n       line3");
+    }
+
+    #[test]
+    fn test_format_multiline_truncates_each_line() {
+        let long = "a".repeat(300);
+        let result = format_multiline("x:", &format!("{}\n{}", long, long));
+        // Each line should be truncated to 200 chars
+        for line in result.split('\n').skip(1) {
+            assert!(line.trim().len() <= 200);
+        }
+    }
+
+    #[test]
+    fn test_format_tool_list_empty() {
+        let result = format_tool_list(&[] as &[&str], 8);
+        assert_eq!(result, "                   tools: 0 []");
+    }
+
+    #[test]
+    fn test_format_tool_list_few() {
+        let result = format_tool_list(&["Bash", "Read"], 8);
+        assert!(result.contains("tools: 2 [Bash, Read]"));
+        assert!(!result.contains('\n'));
+    }
+
+    #[test]
+    fn test_format_tool_list_wraps() {
+        let names: Vec<&str> = vec![
+            "A", "B", "C", "D", "E", "F", "G", "H", "I", "J",
+        ];
+        let result = format_tool_list(&names, 8);
+        // First line has 8, second line has 2
+        let lines: Vec<&str> = result.split('\n').collect();
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].contains("tools: 10 ["));
+        assert!(lines[0].contains("A, B, C, D, E, F, G, H"));
+        assert!(lines[1].contains("I, J"));
+        assert!(lines[1].ends_with(']'));
+    }
+
+    #[test]
     fn test_log_request_system_as_array() {
         let trace_id = make_trace_id();
         let body = serde_json::json!({
@@ -1160,7 +1210,7 @@ data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_d
             .filter_map(|t| t.get("name").and_then(|n| n.as_str()))
             .collect();
         let detail = format_request_body_vv(&trace_id, "claude-sonnet-4-20250514", &body, &tool_names);
-        assert!(detail.contains("tools: [Bash, Read]"));
+        assert!(detail.contains("tools: 2 [Bash, Read]"));
         assert!(!detail.contains("input_schema"));
         assert!(!detail.contains("description"));
     }

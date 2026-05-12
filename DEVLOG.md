@@ -1,5 +1,16 @@
 # ZRouter Development Log
 
+## 2026-05-12 — Debug output: model header, multiline content, tool wrapping, indented separator
+
+- **`src/debug.rs`**: Four changes:
+  1. **Model name header**: Replaced `DEBUG[v/vv] request/response` headers with `[{model}]` (model name in brackets). Removed `trace_id`, `model`, `debug_level` structured fields from `tracing::info!` calls — all info now in message string only, preventing trailing field dump in log output.
+  2. **Multiline message content**: New `format_multiline(label, text)` helper renders newlines in message text as actual newlines with continuation lines indented to after the label's colon. Applied to user/assistant/system message content in vv-mode. Removed `content_preview` (replaced by `content_text` + `format_multiline`).
+  3. **Tool list wrapping**: New `format_tool_list(names, per_line)` helper wraps tool names at 8 per line with continuation lines indented to align after `tools: `. Applied to both v-mode summary and vv-mode body. Format: `tools: {count} [Name1, Name2, ...]`.
+  4. **Indented separator**: VV_SEPARATOR now uses `UUID_INDENT` prefix so the 40-dash separator aligns with content lines.
+- Added 6 tests: `format_multiline` (3), `format_tool_list` (3). Total: 88 tests (was 82).
+
+### Earlier logs (summarized)
+
 ## 2026-05-12 — Debug output: +10 indent, drop color, full tool names, no body headers, 40-dash sep
 
 - **`src/debug.rs`**: Five changes:
