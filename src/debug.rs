@@ -1,6 +1,10 @@
 use crate::config::DebugLevel;
 
 const TEXT_PREVIEW_LEN: usize = 200;
+const TOOL_NAMES_SHOWN: usize = 6;
+
+/// Separator between v-mode summary and vv-mode detail in a merged log line.
+const VV_SEPARATOR: &str = "\n---\n";
 
 /// Log debug information about an Anthropic Messages API request.
 /// Never panics — JSON parse failures are logged as warnings.
@@ -16,7 +20,8 @@ pub fn log_request(trace_id: &uuid::Uuid, model: &str, level: &DebugLevel, body:
                 trace_id = %trace_id,
                 model = model,
                 error = %e,
-                "DEBUG: unable to parse request body"
+                "{} req DEBUG: unable to parse request body",
+                trace_id
             );
             return;
         }
@@ -89,46 +94,44 @@ pub fn log_request(trace_id: &uuid::Uuid, model: &str, level: &DebugLevel, body:
         "absent".to_string()
     };
 
-    let msg = format!(
-        "DEBUG[{level_tag}] request | model: {model} | trace_id: {trace_id}\n\
-         \x20 messages: {msg_count}\n\
-         \x20   user: {user_count}\n\
-         \x20   assistant: {assistant_count}\n\
-         \x20   tool_result: {tool_result_count}\n\
-         \x20 system: {system_line}\n\
-         \x20 tools: {tool_count} [{tools_display}]\n\
-         \x20 max_tokens: {max_tokens}\n\
-         \x20 context_size: ~{content_chars} chars",
-        level_tag = level_tag,
-        model = model,
-        trace_id = trace_id,
-        msg_count = msg_count,
-        user_count = user_count,
-        assistant_count = assistant_count,
-        tool_result_count = tool_result_count,
-        system_line = system_line,
-        tool_count = tool_count,
-        tools_display = format_tool_names(&tool_names),
-        max_tokens = max_tokens,
-        content_chars = content_chars,
+    let mut msg = format!(
+        "{} req DEBUG[{}] request | model: {} | trace_id: {}\n\
+         \x20 messages: {}\n\
+         \x20   user: {}\n\
+         \x20   assistant: {}\n\
+         \x20   tool_result: {}\n\
+         \x20 system: {}\n\
+         \x20 tools: {} [{}]\n\
+         \x20 max_tokens: {}\n\
+         \x20 context_size: ~{} chars",
+        trace_id,
+        level_tag,
+        model,
+        trace_id,
+        msg_count,
+        user_count,
+        assistant_count,
+        tool_result_count,
+        system_line,
+        tool_count,
+        format_tool_names(&tool_names),
+        max_tokens,
+        content_chars,
     );
+
+    // vv mode: append detailed body to same message
+    if level == &DebugLevel::Vv {
+        let detail = format_request_body_vv(trace_id, model, &val, &tool_names);
+        msg = format!("{}{}{}", msg, VV_SEPARATOR, detail);
+    }
 
     tracing::info!(
         trace_id = %trace_id,
         model = model,
         debug_level = level_tag,
-        message = %msg,
+        "{}",
+        msg,
     );
-
-    // vv mode: detailed body with formatted messages
-    if level == &DebugLevel::Vv {
-        let detail = format_request_body_vv(trace_id, model, &val, &tool_names);
-        tracing::info!(
-            trace_id = %trace_id,
-            model = model,
-            message = %detail,
-        );
-    }
 }
 
 /// Log debug information about an Anthropic Messages API response.
@@ -140,57 +143,89 @@ pub fn log_response(trace_id: &uuid::Uuid, model: &str, level: &DebugLevel, body
 
     if body.is_empty() || body.trim().is_empty() {
         let msg = format!(
-            "DEBUG[v] response | model: {} | trace_id: {}\n\
+            "{} ack DEBUG[v] response | model: {} | trace_id: {}\n\
              \x20 stop_reason: empty\n\
              \x20 content_blocks: 0\n\
              \x20 usage: not available",
-            model, trace_id
+            trace_id, model, trace_id
         );
         tracing::info!(
             trace_id = %trace_id,
             model = model,
             debug_level = "v",
-            message = %msg,
+            "{}",
+            msg,
         );
         return;
     }
 
     let val: serde_json::Value = match serde_json::from_str(body) {
         Ok(v) => v,
-        Err(e) => {
-            // Try SSE: body may contain `data: {...}` lines
+        Err(_) => {
+            // Try SSE: body may contain multiple `data: {...}` lines with
+            // optional `event: ...` lines. We want the LAST complete JSON
+            // event because it has the final stop_reason and usage.
             if body.contains("data: ") {
-                if let Some(json_start) = body.find("data: {") {
-                    let json_part = &body[json_start + 6..]; // skip "data: "
-                    if let Ok(v) = serde_json::from_str(json_part) {
-                        log_response_parsed(trace_id, model, level, &v);
-                        return;
-                    }
-                    // Try last complete SSE event
-                    for segment in body.rsplit("data: ") {
-                        if segment.trim().starts_with('{') {
-                            if let Ok(v) = serde_json::from_str(segment.trim()) {
-                                log_response_parsed(trace_id, model, level, &v);
-                                return;
-                            }
-                            break;
-                        }
-                    }
+                if let Some(v) = extract_last_sse_json(body) {
+                    log_response_parsed(trace_id, model, level, &v);
+                    return;
                 }
             }
+            // Final fallback: warn with body preview
             tracing::warn!(
                 trace_id = %trace_id,
                 model = model,
-                error = %e,
                 body_len = body.len(),
                 body_preview = %&body[..body.len().min(80)],
-                "DEBUG: unable to parse response body"
+                "{} ack DEBUG: unable to parse response body",
+                trace_id
             );
             return;
         }
     };
 
     log_response_parsed(trace_id, model, level, &val);
+}
+
+/// Extract the last valid JSON object from SSE `data:` lines.
+///
+/// SSE format supports lines like:
+/// ```text
+/// event: message_start
+/// data: {"type":"message_start",...}
+///
+/// event: content_block_delta
+/// data: {"type":"content_block_delta",...}
+///
+/// data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},...}
+/// ```
+///
+/// We iterate all `data:` lines and return the last one that parses as JSON.
+fn extract_last_sse_json(body: &str) -> Option<serde_json::Value> {
+    let mut last_valid: Option<serde_json::Value> = None;
+
+    for line in body.lines() {
+        let trimmed = line.trim();
+        // Skip event: lines and empty lines
+        if trimmed.is_empty() || trimmed.starts_with("event:") {
+            continue;
+        }
+        if let Some(json_str) = trimmed.strip_prefix("data: ") {
+            if let Ok(v) = serde_json::from_str(json_str.trim()) {
+                last_valid = Some(v);
+            }
+        } else if let Some(json_str) = trimmed.strip_prefix("data:") {
+            // Handle "data:" without trailing space
+            let s = json_str.trim();
+            if !s.is_empty() {
+                if let Ok(v) = serde_json::from_str(s) {
+                    last_valid = Some(v);
+                }
+            }
+        }
+    }
+
+    last_valid
 }
 
 fn log_response_parsed(
@@ -247,8 +282,8 @@ fn log_response_parsed(
     // Build v-mode summary
     let mut lines = vec![
         format!(
-            "DEBUG[{}] response | model: {} | trace_id: {}",
-            level_tag, model, trace_id
+            "{} ack DEBUG[{}] response | model: {} | trace_id: {}",
+            trace_id, level_tag, model, trace_id
         ),
         format!("  stop_reason: {}", stop_reason),
         format!("  content_blocks: {}", block_count),
@@ -267,23 +302,21 @@ fn log_response_parsed(
 
     lines.push(format!("  usage: {}", usage_str));
 
-    let msg = lines.join("\n");
+    let mut msg = lines.join("\n");
+
+    // vv mode: append detailed content blocks to same message
+    if level == &DebugLevel::Vv {
+        let detail = format_response_body_vv(trace_id, model, val, stop_reason, content_blocks, &usage_str);
+        msg = format!("{}{}{}", msg, VV_SEPARATOR, detail);
+    }
+
     tracing::info!(
         trace_id = %trace_id,
         model = model,
         debug_level = level_tag,
-        message = %msg,
+        "{}",
+        msg,
     );
-
-    // vv mode: detailed content blocks
-    if level == &DebugLevel::Vv {
-        let detail = format_response_body_vv(trace_id, model, val, stop_reason, content_blocks, &usage_str);
-        tracing::info!(
-            trace_id = %trace_id,
-            model = model,
-            message = %detail,
-        );
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -467,9 +500,14 @@ fn format_response_body_vv(
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Format tool names for display: all names joined with ", ".
+/// Format tool names for display: up to TOOL_NAMES_SHOWN, then "... +N more".
 fn format_tool_names(names: &[&str]) -> String {
-    names.join(", ")
+    if names.len() <= TOOL_NAMES_SHOWN {
+        names.join(", ")
+    } else {
+        let shown = &names[..TOOL_NAMES_SHOWN];
+        format!("{}, ... +{} more", shown.join(", "), names.len() - TOOL_NAMES_SHOWN)
+    }
 }
 
 /// Truncate string to max_len chars with "..." suffix if needed.
@@ -707,6 +745,74 @@ mod tests {
     }
 
     #[test]
+    fn test_log_response_sse_multi_event() {
+        let trace_id = make_trace_id();
+        // Simulate a streaming response with multiple SSE events
+        let sse = "\
+event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\"}}\n\n\
+event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"text\":\"Hi\"}}\n\n\
+event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":5}}\n\n";
+        log_response(&trace_id, "test", &DebugLevel::V, sse);
+    }
+
+    #[test]
+    fn test_log_response_sse_with_event_lines() {
+        let trace_id = make_trace_id();
+        let sse = "\
+event: message_start\n\
+data: {\"type\":\"message_start\"}\n\
+\n\
+event: message_delta\n\
+data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"},\"usage\":{\"output_tokens\":42}}\n\
+\n";
+        log_response(&trace_id, "test", &DebugLevel::Vv, sse);
+    }
+
+    #[test]
+    fn test_extract_last_sse_json_single() {
+        let sse = r#"data: {"type":"message","stop_reason":"end_turn"}"#;
+        let v = extract_last_sse_json(sse).unwrap();
+        assert_eq!(v["stop_reason"], "end_turn");
+    }
+
+    #[test]
+    fn test_extract_last_sse_json_multiple() {
+        let sse = "\
+data: {\"type\":\"content_block_start\"}\n\
+\n\
+data: {\"type\":\"message_delta\",\"stop_reason\":\"end_turn\"}\n\
+\n";
+        let v = extract_last_sse_json(sse).unwrap();
+        assert_eq!(v["type"], "message_delta");
+    }
+
+    #[test]
+    fn test_extract_last_sse_json_with_event_lines() {
+        let sse = "\
+event: message_start\n\
+data: {\"type\":\"message_start\"}\n\
+\n\
+event: message_delta\n\
+data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"}}\n\
+\n";
+        let v = extract_last_sse_json(sse).unwrap();
+        assert_eq!(v["type"], "message_delta");
+    }
+
+    #[test]
+    fn test_extract_last_sse_json_no_data_lines() {
+        let sse = "event: ping\n\n";
+        assert!(extract_last_sse_json(sse).is_none());
+    }
+
+    #[test]
+    fn test_extract_last_sse_json_invalid_json_ignored() {
+        let sse = "data: [DONE]\n\ndata: {\"type\":\"message\"}\n\n";
+        let v = extract_last_sse_json(sse).unwrap();
+        assert_eq!(v["type"], "message");
+    }
+
+    #[test]
     fn test_content_length_string() {
         let val = serde_json::json!("hello world");
         assert_eq!(content_length(Some(&val)), 11);
@@ -763,24 +869,24 @@ mod tests {
     }
 
     #[test]
-    fn test_format_tool_names_empty() {
-        let names: Vec<&str> = vec![];
-        assert_eq!(format_tool_names(&names), "");
+    fn test_format_tool_names_exactly_six() {
+        let names: Vec<&str> = vec!["a", "b", "c", "d", "e", "f"];
+        assert_eq!(format_tool_names(&names), "a, b, c, d, e, f");
     }
 
     #[test]
-    fn test_format_tool_names_single() {
-        let names: Vec<&str> = vec!["search"];
-        assert_eq!(format_tool_names(&names), "search");
+    fn test_format_tool_names_seven() {
+        let names: Vec<&str> = vec!["a", "b", "c", "d", "e", "f", "g"];
+        let result = format_tool_names(&names);
+        assert_eq!(result, "a, b, c, d, e, f, ... +1 more");
     }
 
     #[test]
-    fn test_format_tool_names_many_shows_all() {
+    fn test_format_tool_names_many() {
         let names: Vec<&str> = vec!["a", "b", "c", "d", "e", "f", "g", "h", "i", "j"];
         let result = format_tool_names(&names);
-        assert_eq!(result, "a, b, c, d, e, f, g, h, i, j");
-        assert!(!result.contains("..."));
-        assert!(!result.contains("more"));
+        assert!(result.contains("a, b, c, d, e, f"));
+        assert!(result.contains("+4 more"));
     }
 
     #[test]
@@ -800,7 +906,7 @@ mod tests {
 
     #[test]
     fn test_truncate_str_unicode() {
-        // "café" = "cafe" + combining acute = 5 chars, 6 bytes
+        // "cafe" + combining acute = 5 chars, 6 bytes
         let s = "cafe\u{0301}xyz";
         let truncated = truncate_str(s, 5);
         // Should not panic on char boundary

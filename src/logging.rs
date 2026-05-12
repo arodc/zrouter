@@ -12,15 +12,7 @@ impl FormatTime for LocalTimer {
     fn format_time(&self, w: &mut Writer<'_>) -> std::fmt::Result {
         let offset = LOCAL_OFFSET.get().copied().unwrap_or(UtcOffset::UTC);
         let now = OffsetDateTime::now_utc().to_offset(offset);
-        write!(
-            w,
-            "{:02}/{:02}/{:02}:{:02}:{:02}",
-            u8::from(now.month()),
-            now.day(),
-            now.hour(),
-            now.minute(),
-            now.second()
-        )
+        write!(w, "{:02}:{:02}:{:02}", now.hour(), now.minute(), now.second())
     }
 }
 
@@ -48,8 +40,13 @@ pub fn init(config: &LoggingConfig) {
             tracing_subscriber::fmt()
                 .with_env_filter(filter)
                 .compact()
-                .with_target(true)
+                .with_target(false)
+                .with_level(false)
+                .with_file(false)
+                .with_line_number(false)
                 .with_timer(LocalTimer)
+                .with_thread_ids(false)
+                .with_thread_names(false)
                 .init();
         }
     }
