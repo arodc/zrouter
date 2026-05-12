@@ -1,5 +1,9 @@
 # ZRouter Development Log
 
+## 2026-05-12 — Fix system prompt truncation in vv mode
+
+- **`src/debug.rs`**: Added `format_multiline_full(label, text)` — same multiline rendering as `format_multiline` but without `truncate_str`. System prompt text now renders in full in vv mode instead of being cut at 200 chars per paragraph. Message content still uses `format_multiline` (truncated). Added 4 tests: `format_multiline_full` (3) and integration test `test_vv_mode_system_prompt_not_truncated`. Total: 92 tests (was 88).
+
 ## 2026-05-12 — Fix tool list continuation line alignment
 
 - **`src/debug.rs`**: Fixed `format_tool_list` continuation indent. Previously used a fixed `"tools: ".len()` (7 chars), which aligned wrapped lines after `tools:` instead of after the opening `[`. Now computes the indent from `format!("tools: {} [", count).len()`, so continuation tool names align with the first tool name on line 1. Updated `test_format_tool_list_wraps` to assert column alignment.

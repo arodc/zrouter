@@ -484,7 +484,7 @@ fn format_request_body_vv(
             _ => String::new(),
         };
         if !sys_text.is_empty() {
-            lines.push(format_multiline(&format!("{UUID_INDENT}system:"), &sys_text));
+            lines.push(format_multiline_full(&format!("{UUID_INDENT}system:"), &sys_text));
         }
     }
 
@@ -564,6 +564,22 @@ fn format_multiline(label: &str, text: &str) -> String {
     let mut result = format!("{} {}", label, truncate_str(lines[0], TEXT_PREVIEW_LEN));
     for line in &lines[1..] {
         result.push_str(&format!("\n{}{}", indent, truncate_str(line, TEXT_PREVIEW_LEN)));
+    }
+    result
+}
+
+/// Same as `format_multiline` but without truncation.
+/// Used for system prompt text which should be shown in full in vv mode.
+fn format_multiline_full(label: &str, text: &str) -> String {
+    if !text.contains('\n') {
+        return format!("{} {}", label, text);
+    }
+    let indent_width = label.len() + 1;
+    let indent = " ".repeat(indent_width);
+    let lines: Vec<&str> = text.split('\n').collect();
+    let mut result = format!("{} {}", label, lines[0]);
+    for line in &lines[1..] {
+        result.push_str(&format!("\n{}{}", indent, line));
     }
     result
 }
@@ -1114,6 +1130,48 @@ data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_d
         for line in result.split('\n').skip(1) {
             assert!(line.trim().len() <= 200);
         }
+    }
+
+    #[test]
+    fn test_format_multiline_full_no_newlines() {
+        let result = format_multiline_full("label:", "hello world");
+        assert_eq!(result, "label: hello world");
+    }
+
+    #[test]
+    fn test_format_multiline_full_with_newlines() {
+        let result = format_multiline_full("label:", "line1\nline2\nline3");
+        assert_eq!(result, "label: line1\n       line2\n       line3");
+    }
+
+    #[test]
+    fn test_format_multiline_full_no_truncation() {
+        let long = "a".repeat(5000);
+        let result = format_multiline_full("x:", &format!("{}\n{}", long, long));
+        // Full text preserved — no truncation
+        let lines: Vec<&str> = result.split('\n').collect();
+        assert_eq!(lines.len(), 2);
+        // First line: "x: " (3 chars) + 5000 = 5003
+        assert_eq!(lines[0].len(), 5003);
+        // Continuation line: indent (3 spaces) + 5000 = 5003
+        assert_eq!(lines[1].len(), 5003);
+    }
+
+    #[test]
+    fn test_vv_mode_system_prompt_not_truncated() {
+        let trace_id = make_trace_id();
+        let long_system = "X".repeat(5000);
+        let body = serde_json::json!({
+            "model": "claude-sonnet-4-20250514",
+            "max_tokens": 1024,
+            "system": long_system,
+            "messages": [
+                {"role": "user", "content": "hi"},
+            ],
+        });
+        let body_bytes = serde_json::to_vec(&body).unwrap();
+        // Should not panic — system prompt rendered in full
+        log_request(&trace_id, "test", &DebugLevel::Vv, &body_bytes);
     }
 
     #[test]
