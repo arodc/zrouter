@@ -14,6 +14,7 @@ It can aggregate APIs from various model providers into a single local API endpo
 - **指数退避**：可配置的重试延迟
 - **TLS/HTTPS**：自定义证书或自动生成持久化自签名证书，支持 HTTP/1.1 + HTTP/2
 - **API Key 认证**：可选的路由级认证，constant-time 比较防止时序攻击
+- **调试日志**：三级调试输出（none/v/vv），按路由配置，UUID 着色区分请求
 - **结构化日志**：JSON 或 text 格式，本地时区时间戳
 - **健康检查**：`GET /health`
 - **优雅关闭**：SIGINT / SIGTERM
@@ -86,12 +87,14 @@ steps = [{ provider = "anthropic" }]
 
 ```toml
 [fallback]
-trigger_codes = [429, 500, 502, 503, 504, 529]  # 触发重试的状态码
-max_retries = 3
-initial_delay_ms = 500
-max_delay_ms = 8000
-circuit_breaker_threshold = 5       # 连续失败次数
-circuit_breaker_cooldown_secs = 60  # 熔断冷却时间
+step_max_retries = 2                 # 每步最大重试次数（2 = 3 次尝试）
+initial_delay_ms = 500               # 初始重试延迟
+max_delay_ms = 8000                  # 最大重试延迟上限
+# retryable_codes = [429, 500, 502, 503, 504, 529]
+# retryable_error_types = []
+# non_retryable_codes = [400, 401, 403, 404]
+# non_retryable_error_types = []
+non_retryable_cooldown_secs = 3600   # 不可重试失败的冷却时间
 ```
 
 ### 日志
@@ -101,6 +104,44 @@ circuit_breaker_cooldown_secs = 60  # 熔断冷却时间
 level = "info"    # trace, debug, info, warn, error
 format = "json"   # json 或 text
 ```
+
+### 调试日志
+
+每条路由可配置 `debug` 级别，控制请求/响应的详细日志输出。
+
+```toml
+[[route]]
+model = "claude-*"
+debug = "v"    # none（默认）、v（摘要）、vv（详细）
+steps = [{ provider = "anthropic" }]
+```
+
+**输出格式**：
+
+```
+11:04:23 INFO uuid req >>> [model]
+                   messages: 15 [user: 8, assistant: 7, tool_result: 8]
+                   system: 32236 chars
+                   tools: [Bash, Read, Write]
+                   max_tokens: 32000
+                   context_size: ~59420 chars
+11:04:32 INFO uuid ack <<< [model]
+                   stop_reason: tool_use
+                   content_blocks: 2 [text: 1, tool_use: 1 [Bash]]
+                   usage: input=59, output=262
+```
+
+- 首行（`req >>>`/`ack <<<`/`err <<<`）无色，便于 grep
+- 后续详情行按 UUID 着色，同一请求的 req/ack 颜色一致
+- 48 色调色板，暗色终端可见
+
+**三级说明**：
+
+| 级别 | 请求 | 响应 |
+|------|------|------|
+| `none` | 仅首行 `req >>>` | 仅首行 `ack <<<`（含 HTTP status 和 provider name）或 `err <<<` |
+| `v` | 摘要：消息计数、system 长度、工具列表 | 摘要：stop_reason、内容块计数、token 用量 |
+| `vv` | `v` + 每条消息内容预览、system 全文 | `v` + 每个内容块详情、thinking 全文 |
 
 ## API
 
@@ -185,6 +226,7 @@ sudo systemctl enable --now zrouter
 | `provider.rs`    | Provider 注册表，原子熔断器             |
 | `fallback.rs`    | 重试循环，指数退避                      |
 | `auth.rs`        | API Key constant-time 验证             |
+| `debug.rs`       | 调试日志格式化，UUID 着色，ANSI 安全防护 |
 | `logging.rs`     | 结构化日志，本地时区时间戳              |
 
 ## 错误响应格式

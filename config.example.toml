@@ -49,7 +49,7 @@ read_timeout_secs = 300
 
 [[route]]
 model = "claude-opus-*"
-# debug = "v"   # "none" (default), "v" (context length + tool names), "vv" (full content)
+# debug = "v"   # "none" (default), "v" (summary), "vv" (detailed)
 steps = [
   { provider = "anthropic" },
   { provider = "openrouter" },
