@@ -9,11 +9,14 @@ const TOOL_NAMES_SHOWN: usize = 6;
 const VV_SEPARATOR: &str = "\n---\n";
 
 /// ANSI escape codes for terminal coloring.
-const ANSI_YELLOW: &str = "\x1b[33m";
-const ANSI_RESET: &str = "\x1b[0m";
+/// Uses `\u{001b}` syntax (ESC byte 0x1B) — `\x1b` is treated differently
+/// by tracing's text formatter and renders as literal text.
+/// Bright yellow (93) instead of dim yellow (33) for better visibility.
+const ANSI_YELLOW: &str = "\u{001b}[93m";
+const ANSI_RESET: &str = "\u{001b}[0m";
 
-/// Indent width matching UUID first dash position (8 hex chars + 1 dash = 9).
-const UUID_INDENT: &str = "         ";
+/// Indent width: UUID first dash position (9) + 10 extra alignment = 19.
+const UUID_INDENT: &str = "                   ";
 
 /// Format a child line indented to align after the parent label's value.
 /// Prepends the UUID base indent (9 spaces) so all content lines start at
@@ -724,22 +727,22 @@ mod tests {
     #[test]
     fn test_indent_after_basic() {
         let result = indent_after("messages:", "user:", &2);
-        // UUID_INDENT(9) + "messages:"(9) + 1 = 19 spaces, then "user: 2"
-        assert_eq!(result, "                    user: 2");
+        // UUID_INDENT(19) + "messages:"(9) + 1 = 29 spaces, then "user: 2"
+        assert_eq!(result, "                              user: 2");
     }
 
     #[test]
     fn test_indent_after_tools() {
         let result = indent_after("tools:", "max_tokens:", &32000);
-        // UUID_INDENT(9) + "tools:"(6) + 1 = 16 spaces, then "max_tokens: 32000"
-        assert_eq!(result, "                 max_tokens: 32000");
+        // UUID_INDENT(19) + "tools:"(6) + 1 = 26 spaces, then "max_tokens: 32000"
+        assert_eq!(result, "                           max_tokens: 32000");
     }
 
     #[test]
     fn test_indent_after_short_label() {
         let result = indent_after("x:", "y:", &"hello");
-        // UUID_INDENT(9) + "x:"(2) + 1 = 12 spaces, then "y: hello"
-        assert_eq!(result, "             y: hello");
+        // UUID_INDENT(19) + "x:"(2) + 1 = 22 spaces, then "y: hello"
+        assert_eq!(result, "                       y: hello");
     }
 
     // --- Existing tests ---

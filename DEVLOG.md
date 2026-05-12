@@ -1,5 +1,9 @@
 # ZRouter Development Log
 
+## 2026-05-12 — Indent +10, bright yellow ANSI via \u{001b}
+
+- **`src/debug.rs`**: `UUID_INDENT` increased from 9 to 19 spaces. Changed ANSI yellow from `\x1b[33m` to `\u{001b}[93m` (bright yellow via Unicode escape — tracing text formatter treats `\x1b` differently). Fixed 3 `indent_after` tests for new indent width.
+
 ## 2026-05-12 — Fix ANSI colors, remove body diagnostics, clean up vv response format
 
 - **`src/logging.rs`**: Added `.with_ansi(true)` to the compact text format builder. Without this, `tracing_subscriber` uses its default (which depends on whether stdout is a TTY), and ANSI escape codes like `\x1b[33m` were rendered as literal text in the debug output, breaking visual indentation. JSON format path unchanged.
