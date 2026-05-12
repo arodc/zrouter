@@ -220,7 +220,13 @@ async fn handle_request(
     };
 
     if route.debug == DebugLevel::None {
-        tracing::info!(trace_id = %trace_id, model = %model, "Request received");
+        tracing::info!(
+            "{}",
+            crate::debug::colorize_uuid(
+                &trace_id,
+                &format!("{} req >>> [{}]", trace_id, model)
+            )
+        );
     }
 
     let fallback_config = &state.config.fallback;
@@ -259,11 +265,17 @@ async fn handle_request(
         Ok(fallback_result) => {
             if route.debug == DebugLevel::None {
                 tracing::info!(
-                    trace_id = %trace_id,
-                    provider = %fallback_result.provider_name,
-                    model = %model,
-                    status = fallback_result.status,
-                    "Request completed"
+                    "{}",
+                    crate::debug::colorize_uuid(
+                        &trace_id,
+                        &format!(
+                            "{} ack <<< [{}] {} {}",
+                            trace_id,
+                            model,
+                            fallback_result.status,
+                            fallback_result.provider_name,
+                        )
+                    )
                 );
             }
 
@@ -282,9 +294,13 @@ async fn handle_request(
                 .body(fallback_result.body)
         }
         Err(error_json) => {
-            if route.debug == DebugLevel::None {
-                tracing::warn!(trace_id = %trace_id, model = %model, "All providers exhausted");
-            }
+            tracing::warn!(
+                "{}",
+                crate::debug::colorize_uuid(
+                    &trace_id,
+                    &format!("{} err <<< [{}]: all providers exhausted", trace_id, model)
+                )
+            );
             Response::builder()
                 .status(StatusCode::SERVICE_UNAVAILABLE)
                 .header("content-type", "application/json")

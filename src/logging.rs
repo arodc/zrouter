@@ -41,6 +41,7 @@ pub fn init(config: &LoggingConfig) {
                 .with_env_filter(filter)
                 .compact()
                 .with_ansi(true)
+                .with_ansi_sanitization(false)
                 .with_target(false)
                 .with_level(true)
                 .with_file(false)

@@ -4,6 +4,43 @@ use crate::config::DebugLevel;
 
 const TEXT_PREVIEW_LEN: usize = 200;
 
+const ANSI_RESET: &str = "\x1b[0m";
+
+/// ANSI 256-color palette: 48 visible 256-color values from the 6x6x6 cube
+/// (indices 16-231). All entries have perceived brightness > 50
+/// (L = 0.299*R + 0.587*G + 0.114*B) on dark backgrounds.
+const COLOR_PALETTE: &[u8] = &[
+    27, 33, 39, 45, 51, 63, 69, 75, 81, 87,          // blue spectrum
+    22, 28, 34, 40, 46, 76, 82, 118, 154, 190,       // green spectrum
+    58, 64, 70, 130, 136, 142, 148,                   // teal
+    120, 123, 153,                                     // cyan/light-blue
+    156,                                               // yellow-green
+    166, 172, 178, 184, 208, 214, 216, 220, 226,      // yellow/orange/amber
+    197,                                                // rose/red
+    200, 201, 206, 212, 218, 219, 224,                 // pink/magenta
+];
+
+/// Generate an ANSI 256-color foreground prefix for the given UUID.
+fn uuid_color_prefix(uuid: &uuid::Uuid) -> String {
+    let hash = uuid.as_u128();
+    let idx = (hash as usize) % COLOR_PALETTE.len();
+    format!("\x1b[38;5;{}m", COLOR_PALETTE[idx])
+}
+
+/// Strip ESC (0x1b) characters from a string to prevent ANSI injection.
+/// User-controlled fields (e.g. model name) may contain escape sequences
+/// that could corrupt terminal output.
+fn sanitize_ansi(s: &str) -> String {
+    s.replace('\x1b', "")
+}
+
+/// Wrap `msg` in UUID-derived ANSI foreground color.
+/// User-supplied ANSI escapes in `msg` are stripped first so that only
+/// our color codes survive.
+pub fn colorize_uuid(uuid: &uuid::Uuid, msg: &str) -> String {
+    format!("{}{}{}", uuid_color_prefix(uuid), sanitize_ansi(msg), ANSI_RESET)
+}
+
 /// Separator between v-mode summary and vv-mode detail in a merged log line.
 /// Indented with UUID_INDENT to align with content.
 const VV_SEPARATOR_DASHES: &str = "----------------------------------------";
@@ -40,7 +77,7 @@ pub fn log_request(trace_id: &uuid::Uuid, model: &str, level: &DebugLevel, body:
         Err(e) => {
             tracing::warn!(
                 "{} req [{}]: unable to parse request body: {}",
-                trace_id, model, e
+                trace_id, sanitize_ansi(model), e
             );
             return;
         }
@@ -110,22 +147,26 @@ pub fn log_request(trace_id: &uuid::Uuid, model: &str, level: &DebugLevel, body:
         "absent".to_string()
     };
 
+    // Build inline sub-count for messages: "messages: N [user: a, assistant: b, tool_result: c]"
+    let msg_sub = if msg_count == 0 {
+        "messages: 0".to_string()
+    } else {
+        format!(
+            "messages: {} [user: {}, assistant: {}, tool_result: {}]",
+            msg_count, user_count, assistant_count, tool_result_count
+        )
+    };
+
     let msg = format!(
-        "{uuid} req [{model}]\n\
-         {UUID_INDENT}messages: {msg_count}\n\
-         {user_line}\n\
-         {assistant_line}\n\
-         {tool_result_line}\n\
+        "{uuid} req >>> [{model}]\n\
+         {UUID_INDENT}{msg_sub}\n\
          {UUID_INDENT}system: {system_line}\n\
          {tools_line}\n\
          {max_tokens_line}\n\
          {context_size_line}",
         uuid = trace_id,
         model = model,
-        msg_count = msg_count,
-        user_line = indent_after("messages:", "user:", &user_count),
-        assistant_line = indent_after("messages:", "assistant:", &assistant_count),
-        tool_result_line = indent_after("messages:", "tool_result:", &tool_result_count),
+        msg_sub = msg_sub,
         system_line = system_line,
         tools_line = format_tool_list(&tool_names, 8),
         max_tokens_line = indent_after("tools:", "max_tokens:", &max_tokens),
@@ -140,7 +181,7 @@ pub fn log_request(trace_id: &uuid::Uuid, model: &str, level: &DebugLevel, body:
         msg
     };
 
-    tracing::info!("{}", msg);
+    tracing::info!("{}", colorize_uuid(trace_id, &msg));
 }
 
 /// Log debug information about an Anthropic Messages API response.
@@ -157,7 +198,7 @@ pub fn log_response(trace_id: &uuid::Uuid, model: &str, level: &DebugLevel, body
              {UUID_INDENT}content_blocks: 0\n\
              {UUID_INDENT}usage: not available",
             trace_id = trace_id,
-            model = model,
+            model = sanitize_ansi(model),
         );
         return;
     }
@@ -177,7 +218,7 @@ pub fn log_response(trace_id: &uuid::Uuid, model: &str, level: &DebugLevel, body
             // Final fallback: warn with body preview and specific error
             tracing::warn!(
                 "{} ack [{}]: unable to parse response body ({} bytes): {}",
-                trace_id, model, body.len(), json_err
+                trace_id, sanitize_ansi(model), body.len(), json_err
             );
             return;
         }
@@ -318,6 +359,7 @@ fn log_response_parsed(
     let block_count = content_blocks.map_or(0, |a| a.len());
 
     let mut text_count: usize = 0;
+    let mut thinking_count: usize = 0;
     let mut tool_use_count: usize = 0;
     let mut tool_call_names: Vec<&str> = Vec::new();
 
@@ -326,6 +368,7 @@ fn log_response_parsed(
             let block_type = block.get("type").and_then(|t| t.as_str()).unwrap_or("");
             match block_type {
                 "text" => text_count += 1,
+                "thinking" => thinking_count += 1,
                 "tool_use" => {
                     tool_use_count += 1;
                     if let Some(name) = block.get("name").and_then(|n| n.as_str()) {
@@ -352,31 +395,48 @@ fn log_response_parsed(
         (None, None) => "not available".to_string(),
     };
 
-    // Build v-mode summary with colon-aligned indentation
+    // Build inline sub-count for content_blocks
+    let content_blocks_line = if block_count == 0 {
+        format!("{UUID_INDENT}content_blocks: 0")
+    } else {
+        let mut parts: Vec<String> = Vec::new();
+        if text_count > 0 {
+            parts.push(format!("text: {}", text_count));
+        }
+        if thinking_count > 0 {
+            parts.push(format!("thinking: {}", thinking_count));
+        }
+        if tool_use_count > 0 {
+            if tool_call_names.is_empty() {
+                parts.push(format!("tool_use: {}", tool_use_count));
+            } else {
+                parts.push(format!(
+                    "tool_use: {} [{}]",
+                    tool_use_count,
+                    tool_call_names.join(", ")
+                ));
+            }
+        }
+        if parts.is_empty() {
+            format!("{UUID_INDENT}content_blocks: {block_count}")
+        } else {
+            format!(
+                "{UUID_INDENT}content_blocks: {} [{}]",
+                block_count,
+                parts.join(", ")
+            )
+        }
+    };
+
     let mut lines = vec![
         format!(
-            "{trace_id} ack [{model}]",
+            "{trace_id} ack <<< [{model}]",
             trace_id = trace_id,
             model = model,
         ),
         format!("{UUID_INDENT}stop_reason: {stop_reason}"),
-        format!("{UUID_INDENT}content_blocks: {block_count}"),
+        content_blocks_line,
     ];
-
-    // Sub-counts for content blocks — align after "content_blocks:"
-    if block_count > 0 {
-        if text_count > 0 {
-            lines.push(indent_after("content_blocks:", "text:", &text_count));
-        }
-        if tool_use_count > 0 {
-            let names_str = tool_call_names.join(", ");
-            lines.push(indent_after(
-                "content_blocks:",
-                "tool_use:",
-                &format!("{} [{}]", tool_use_count, names_str),
-            ));
-        }
-    }
 
     lines.push(format!("{UUID_INDENT}usage: {usage_str}"));
 
@@ -388,7 +448,7 @@ fn log_response_parsed(
         msg = format!("{}\n{}{}\n{}", msg, UUID_INDENT, VV_SEPARATOR_DASHES, detail);
     }
 
-    tracing::info!("{}", msg);
+    tracing::info!("{}", colorize_uuid(trace_id, &msg));
 }
 
 // ---------------------------------------------------------------------------
@@ -516,11 +576,17 @@ fn format_response_body_vv(
                         .get("text")
                         .and_then(|t| t.as_str())
                         .unwrap_or("");
-                    lines.push(format!(
-                        "{UUID_INDENT}[{}] text: {}",
-                        i,
-                        truncate_str(text, TEXT_PREVIEW_LEN)
-                    ));
+                    let label = format!("{UUID_INDENT}[{}] text:", i);
+                    lines.push(format_multiline(&label, text));
+                }
+                "thinking" => {
+                    let text = block
+                        .get("thinking")
+                        .and_then(|t| t.as_str())
+                        .or_else(|| block.get("text").and_then(|t| t.as_str()))
+                        .unwrap_or("");
+                    let label = format!("{UUID_INDENT}[{}] thinking:", i);
+                    lines.push(format_multiline_full(&label, text));
                 }
                 "tool_use" => {
                     let name = block
@@ -715,6 +781,60 @@ mod tests {
 
     fn make_trace_id() -> uuid::Uuid {
         uuid::Uuid::new_v4()
+    }
+
+    // --- ANSI sanitization tests ---
+
+    #[test]
+    fn test_sanitize_ansi_strips_esc() {
+        assert_eq!(sanitize_ansi("hello"), "hello");
+        assert_eq!(sanitize_ansi("a\x1bb"), "ab");
+        assert_eq!(sanitize_ansi("\x1b[31mred\x1b[0m"), "[31mred[0m");
+    }
+
+    #[test]
+    fn test_sanitize_ansi_empty() {
+        assert_eq!(sanitize_ansi(""), "");
+    }
+
+    #[test]
+    fn test_colorize_uuid_strips_user_ansi() {
+        let uuid = uuid::Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap();
+        let result = colorize_uuid(&uuid, "\x1b[31mmalicious\x1b[0m");
+        // Our color prefix should be present, but user's ESC chars stripped
+        assert!(result.starts_with("\x1b[38;5;"));
+        assert!(result.ends_with("\x1b[0m"));
+        // User's ESC chars are gone — only our color prefix contains \x1b
+        assert_eq!(result.matches('\x1b').count(), 2); // prefix + reset only
+        assert!(result.contains("malicious"));
+    }
+
+    // --- UUID color tests ---
+
+    #[test]
+    fn test_colorize_uuid_wraps_with_ansi() {
+        let uuid = uuid::Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap();
+        let result = colorize_uuid(&uuid, "hello");
+        assert!(result.starts_with("\x1b[38;5;"));
+        assert!(result.ends_with("\x1b[0m"));
+        assert!(result.contains("hello"));
+    }
+
+    #[test]
+    fn test_uuid_color_prefix_deterministic() {
+        let uuid = uuid::Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap();
+        let a = uuid_color_prefix(&uuid);
+        let b = uuid_color_prefix(&uuid);
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn test_uuid_color_prefix_different_uuids() {
+        let a = uuid::Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap();
+        let b = uuid::Uuid::parse_str("660e8400-e29b-41d4-a716-446655440001").unwrap();
+        // Not guaranteed different, but extremely likely with 48 palette entries
+        assert!(uuid_color_prefix(&a).starts_with("\x1b[38;5;"));
+        assert!(uuid_color_prefix(&b).starts_with("\x1b[38;5;"));
     }
 
     // --- indent_after tests ---
@@ -1344,6 +1464,193 @@ data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_d
         let val = serde_json::json!(null);
         let result = format_compact_json(&val);
         assert_eq!(result, "null");
+    }
+
+    // --- thinking block tests ---
+
+    #[test]
+    fn test_log_response_with_thinking_and_text() {
+        let trace_id = make_trace_id();
+        let body = serde_json::json!({
+            "type": "message",
+            "id": "msg_think1",
+            "stop_reason": "end_turn",
+            "content": [
+                {"type": "thinking", "thinking": "Let me analyze this step by step."},
+                {"type": "text", "text": "Here is my answer."},
+            ],
+            "usage": {
+                "input_tokens": 500,
+                "output_tokens": 120,
+            },
+        });
+        let body_str = serde_json::to_string(&body).unwrap();
+        log_response(&trace_id, "test-thinking", &DebugLevel::V, &body_str);
+        log_response(&trace_id, "test-thinking", &DebugLevel::Vv, &body_str);
+    }
+
+    #[test]
+    fn test_log_response_with_thinking_text_and_tool_use() {
+        let trace_id = make_trace_id();
+        let body = serde_json::json!({
+            "type": "message",
+            "id": "msg_think2",
+            "stop_reason": "tool_use",
+            "content": [
+                {"type": "thinking", "thinking": "I need to look up that file."},
+                {"type": "text", "text": "Let me check that for you."},
+                {"type": "tool_use", "id": "tu_1", "name": "read_file", "input": {"path": "/tmp/f.txt"}},
+            ],
+            "usage": {
+                "input_tokens": 1000,
+                "output_tokens": 200,
+            },
+        });
+        let body_str = serde_json::to_string(&body).unwrap();
+        log_response(&trace_id, "test-thinking-full", &DebugLevel::V, &body_str);
+        log_response(&trace_id, "test-thinking-full", &DebugLevel::Vv, &body_str);
+    }
+
+    #[test]
+    fn test_vv_mode_thinking_block_shows_text() {
+        let trace_id = make_trace_id();
+        let val = serde_json::json!({
+            "type": "message",
+            "stop_reason": "end_turn",
+            "content": [
+                {"type": "thinking", "thinking": "Analyzing the request carefully."},
+                {"type": "text", "text": "Here is the answer."},
+            ],
+        });
+
+        let blocks = val.get("content").and_then(|c| c.as_array()).unwrap();
+        let detail = format_response_body_vv(&trace_id, Some(blocks));
+
+        assert!(detail.contains("[0] thinking:"));
+        assert!(detail.contains("Analyzing the request carefully."));
+        assert!(detail.contains("[1] text:"));
+    }
+
+    #[test]
+    fn test_vv_mode_thinking_block_fallback_to_text_field() {
+        // SSE-merged thinking blocks use "text" field instead of "thinking"
+        let trace_id = make_trace_id();
+        let val = serde_json::json!({
+            "type": "message",
+            "stop_reason": "end_turn",
+            "content": [
+                {"type": "thinking", "text": "Merged SSE thinking content."},
+            ],
+        });
+
+        let blocks = val.get("content").and_then(|c| c.as_array()).unwrap();
+        let detail = format_response_body_vv(&trace_id, Some(blocks));
+
+        assert!(detail.contains("[0] thinking:"));
+        assert!(detail.contains("Merged SSE thinking content."));
+    }
+
+    #[test]
+    fn test_vv_mode_response_multiline_text_indented() {
+        let trace_id = make_trace_id();
+        let val = serde_json::json!({
+            "type": "message",
+            "stop_reason": "end_turn",
+            "content": [
+                {"type": "text", "text": "line one\nline two\nline three"},
+                {"type": "thinking", "thinking": "think A\nthink B"},
+            ],
+        });
+
+        let blocks = val.get("content").and_then(|c| c.as_array()).unwrap();
+        let detail = format_response_body_vv(&trace_id, Some(blocks));
+
+        // text block: multiline indented to align after label
+        let text_label = format!("{UUID_INDENT}[0] text:");
+        assert!(detail.starts_with(&format!("{} line one", text_label)));
+        // Continuation lines indented to text_label.len() + 1
+        let text_indent = " ".repeat(text_label.len() + 1);
+        assert!(detail.contains(&format!("\n{}line two", text_indent)));
+        assert!(detail.contains(&format!("\n{}line three", text_indent)));
+
+        // thinking block: same treatment
+        let think_label = format!("{UUID_INDENT}[1] thinking:");
+        assert!(detail.contains(&format!("{} think A", think_label)));
+        let think_indent = " ".repeat(think_label.len() + 1);
+        assert!(detail.contains(&format!("\n{}think B", think_indent)));
+    }
+
+    #[test]
+    fn test_vv_mode_thinking_block_not_truncated() {
+        // Thinking content should NOT be truncated to 200 chars in vv mode
+        let trace_id = make_trace_id();
+        let long_thinking = "X".repeat(5000);
+        let val = serde_json::json!({
+            "type": "message",
+            "stop_reason": "end_turn",
+            "content": [
+                {"type": "thinking", "thinking": long_thinking},
+                {"type": "text", "text": "Short reply."},
+            ],
+        });
+
+        let blocks = val.get("content").and_then(|c| c.as_array()).unwrap();
+        let detail = format_response_body_vv(&trace_id, Some(blocks));
+
+        // The full 5000-char thinking content must be present
+        assert!(detail.contains(&"X".repeat(5000)));
+    }
+
+    #[test]
+    fn test_vv_mode_text_block_still_truncated() {
+        // Text content should still be truncated to 200 chars in vv mode
+        let trace_id = make_trace_id();
+        let long_text = "A".repeat(300);
+        let val = serde_json::json!({
+            "type": "message",
+            "stop_reason": "end_turn",
+            "content": [
+                {"type": "text", "text": long_text},
+            ],
+        });
+
+        let blocks = val.get("content").and_then(|c| c.as_array()).unwrap();
+        let detail = format_response_body_vv(&trace_id, Some(blocks));
+
+        // The text block line should be truncated (no 300-char run)
+        assert!(!detail.contains(&"A".repeat(300)));
+    }
+
+    // --- sub-count edge case tests ---
+
+    #[test]
+    fn test_log_request_zero_messages_no_brackets() {
+        let trace_id = make_trace_id();
+        let body = serde_json::json!({
+            "model": "claude-sonnet-4-20250514",
+            "max_tokens": 1024,
+            "messages": [],
+        });
+        let body_bytes = serde_json::to_vec(&body).unwrap();
+        // Should output "messages: 0" without brackets — no panic
+        log_request(&trace_id, "test", &DebugLevel::V, &body_bytes);
+    }
+
+    #[test]
+    fn test_log_response_unknown_block_types_no_empty_brackets() {
+        let trace_id = make_trace_id();
+        let body = serde_json::json!({
+            "type": "message",
+            "stop_reason": "end_turn",
+            "content": [
+                {"type": "image", "source": {"data": "..."}},
+                {"type": "custom_block", "value": 42},
+            ],
+            "usage": {"input_tokens": 10, "output_tokens": 5},
+        });
+        let body_str = serde_json::to_string(&body).unwrap();
+        // Should output "content_blocks: 2" without empty brackets — no panic
+        log_response(&trace_id, "test", &DebugLevel::V, &body_str);
     }
 
 }
