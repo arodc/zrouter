@@ -30,7 +30,7 @@ fn uuid_color_prefix(uuid: &uuid::Uuid) -> String {
 /// Strip ESC (0x1b) characters from a string to prevent ANSI injection.
 /// User-controlled fields (e.g. model name) may contain escape sequences
 /// that could corrupt terminal output.
-fn sanitize_ansi(s: &str) -> String {
+pub fn sanitize_ansi(s: &str) -> String {
     s.replace('\x1b', "")
 }
 
@@ -39,6 +39,17 @@ fn sanitize_ansi(s: &str) -> String {
 /// our color codes survive.
 pub fn colorize_uuid(uuid: &uuid::Uuid, msg: &str) -> String {
     format!("{}{}{}", uuid_color_prefix(uuid), sanitize_ansi(msg), ANSI_RESET)
+}
+
+/// Log a message where the first line (containing direction arrows >>>/<<<)
+/// is uncolored, and all subsequent detail lines are wrapped in UUID-derived
+/// ANSI color. If the message has only one line, it is logged without color.
+fn log_colored_detail(trace_id: &uuid::Uuid, msg: &str) {
+    if let Some((header, body)) = msg.split_once('\n') {
+        tracing::info!("{}\n{}", sanitize_ansi(header), colorize_uuid(trace_id, body));
+    } else {
+        tracing::info!("{}", sanitize_ansi(msg));
+    }
 }
 
 /// Separator between v-mode summary and vv-mode detail in a merged log line.
@@ -181,7 +192,7 @@ pub fn log_request(trace_id: &uuid::Uuid, model: &str, level: &DebugLevel, body:
         msg
     };
 
-    tracing::info!("{}", colorize_uuid(trace_id, &msg));
+    log_colored_detail(trace_id, &msg);
 }
 
 /// Log debug information about an Anthropic Messages API response.
@@ -192,14 +203,15 @@ pub fn log_response(trace_id: &uuid::Uuid, model: &str, level: &DebugLevel, body
     }
 
     if body.is_empty() || body.trim().is_empty() {
-        tracing::info!(
-            "{trace_id} ack [{model}]\n\
+        let msg = format!(
+            "{trace_id} ack <<< [{model}]\n\
              {UUID_INDENT}stop_reason: empty\n\
              {UUID_INDENT}content_blocks: 0\n\
              {UUID_INDENT}usage: not available",
             trace_id = trace_id,
-            model = sanitize_ansi(model),
+            model = model,
         );
+        log_colored_detail(trace_id, &msg);
         return;
     }
 
@@ -448,7 +460,7 @@ fn log_response_parsed(
         msg = format!("{}\n{}{}\n{}", msg, UUID_INDENT, VV_SEPARATOR_DASHES, detail);
     }
 
-    tracing::info!("{}", colorize_uuid(trace_id, &msg));
+    log_colored_detail(trace_id, &msg);
 }
 
 // ---------------------------------------------------------------------------
@@ -797,6 +809,17 @@ mod tests {
         assert_eq!(sanitize_ansi(""), "");
     }
 
+    // --- UUID color tests ---
+
+    #[test]
+    fn test_colorize_uuid_wraps_with_ansi() {
+        let uuid = uuid::Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap();
+        let result = colorize_uuid(&uuid, "hello");
+        assert!(result.starts_with("\x1b[38;5;"));
+        assert!(result.ends_with("\x1b[0m"));
+        assert!(result.contains("hello"));
+    }
+
     #[test]
     fn test_colorize_uuid_strips_user_ansi() {
         let uuid = uuid::Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap();
@@ -807,17 +830,6 @@ mod tests {
         // User's ESC chars are gone — only our color prefix contains \x1b
         assert_eq!(result.matches('\x1b').count(), 2); // prefix + reset only
         assert!(result.contains("malicious"));
-    }
-
-    // --- UUID color tests ---
-
-    #[test]
-    fn test_colorize_uuid_wraps_with_ansi() {
-        let uuid = uuid::Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap();
-        let result = colorize_uuid(&uuid, "hello");
-        assert!(result.starts_with("\x1b[38;5;"));
-        assert!(result.ends_with("\x1b[0m"));
-        assert!(result.contains("hello"));
     }
 
     #[test]
@@ -1651,6 +1663,30 @@ data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_d
         let body_str = serde_json::to_string(&body).unwrap();
         // Should output "content_blocks: 2" without empty brackets — no panic
         log_response(&trace_id, "test", &DebugLevel::V, &body_str);
+    }
+
+    // --- log_colored_detail split coloring tests ---
+
+    #[test]
+    fn test_colorize_uuid_single_line_no_newline() {
+        // Single-line message: colorize_uuid wraps the whole thing
+        let uuid = uuid::Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap();
+        let result = colorize_uuid(&uuid, "hello world");
+        assert!(result.starts_with("\x1b[38;5;"));
+        assert!(result.contains("hello world"));
+        assert!(result.ends_with("\x1b[0m"));
+    }
+
+    #[test]
+    fn test_colorize_uuid_multiline_entire_body_colored() {
+        // Multi-line message: entire content is wrapped in color
+        let uuid = uuid::Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap();
+        let msg = "header line\ndetail line 1\ndetail line 2";
+        let result = colorize_uuid(&uuid, msg);
+        // Only one ANSI prefix and one reset (wrapping entire string)
+        assert_eq!(result.matches('\x1b').count(), 2);
+        assert!(result.contains("header line"));
+        assert!(result.contains("detail line 1"));
     }
 
 }

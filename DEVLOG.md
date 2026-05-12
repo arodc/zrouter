@@ -1,5 +1,21 @@
 # ZRouter Development Log
 
+## 2026-05-12 — Close remaining ANSI injection surfaces
+
+- **`src/debug.rs`**: Made `sanitize_ansi` public so it can be used from server.rs. Applied `sanitize_ansi` to the header line in `log_colored_detail`, preventing ANSI injection via user-controlled model names in the uncolored header path. The single-line (no-detail) path also now sanitizes.
+- **`src/server.rs`**: Applied `crate::debug::sanitize_ansi(&model)` to all three debug=none log lines (`req >>>`, `ack <<<`, `err <<<`), closing the last ANSI injection surface where user-controlled model values reached the terminal unfiltered. Total: 109 tests (all pass).
+
+## 2026-05-12 — Fix ANSI sanitization, empty-body coloring, and warn-path ANSI injection
+
+- **`src/logging.rs`**: Restored `.with_ansi_sanitization(false)` on the text-mode tracing subscriber. Without this setting, tracing-subscriber strips all ANSI escape codes from logged output, defeating the `colorize_uuid` coloring applied by `log_colored_detail`.
+- **`src/debug.rs`**: Changed `log_response` empty-body path to use `log_colored_detail` instead of `tracing::info!`, so detail lines receive UUID-derived ANSI coloring consistent with `log_response_parsed`. Also fixed the direction arrow from `ack [` to `ack <<< [` for consistency.
+- **`src/debug.rs`**: Applied `sanitize_ansi()` to the `model` parameter in both `log_request` and `log_response` warn paths, preventing ANSI injection via user-controlled model names when `with_ansi_sanitization(false)` allows escape codes through. Total: 109 tests (all pass).
+
+## 2026-05-12 — Arrow-line coloring split: header uncolored, detail lines colored
+
+- **`src/debug.rs`**: Added ANSI coloring infrastructure (`colorize_uuid`, `sanitize_ansi`, `uuid_color_prefix`, `COLOR_PALETTE`). Introduced `log_colored_detail` helper that splits a multi-line message at the first newline: the header line (containing direction arrows `>>>`/`<<<`) is logged uncolored, and all subsequent detail lines are wrapped in UUID-derived ANSI color. Changed `log_request` and `log_response_parsed` to use `log_colored_detail` instead of `tracing::info!`. Added 8 tests for ANSI sanitization, UUID color, and colorize_uuid behavior. Total: 109 tests (unchanged count, 6 new color tests + 2 split tests).
+- **`src/server.rs`**: Removed `colorize_uuid` wrapper from the three `debug=none` log lines (`req >>>`, `ack <<<`, `err <<<`). These single-line logs now output plain text without ANSI coloring.
+
 ## 2026-05-12 — Fix thinking block truncation in vv-mode response debug
 
 - **`src/debug.rs`**: Changed `format_response_body_vv` to use `format_multiline_full` for thinking blocks instead of `format_multiline`. The former does not truncate lines to 200 characters, matching the request-side strategy where system prompts use `format_multiline_full` (no truncation) while message content uses `format_multiline` (truncated). Text blocks in response continue to use `format_multiline`. Added 2 tests: `test_vv_mode_thinking_block_not_truncated`, `test_vv_mode_text_block_still_truncated`. Total: 109 tests (was 107).
@@ -18,7 +34,7 @@
 
 ### Earlier logs (summarized)
 
-2026-05-12: Added thinking block support in response debug logging (v-mode sub-counts and vv-mode content display with preview truncation). Sub-count format edge cases (zero brackets). Inline sub-counts and direction arrows. Color palette fixes, ANSI sanitization, UUID color. SSE parsing overhaul, compact debug format.
+2026-05-12: Compact debug logging with UUID hashing and ANSI coloring. SSE parsing overhaul, color palette fixes, ANSI sanitization, UUID color. Thinking block support in v/vv response debug. vv-mode multiline content indentation aligned to label colon. Inline sub-counts and direction arrows.
 
 2026-04-25: Connection interruption logging, Bearer auth, HTTP/TLS auto-detect, self-signed cert persistence, local timezone timestamps. HTTPS/HTTP/2 server with TLS module, ALPN negotiation.
 
