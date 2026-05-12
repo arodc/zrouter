@@ -1,7 +1,6 @@
 use crate::config::DebugLevel;
 
 const TEXT_PREVIEW_LEN: usize = 200;
-const TOOL_NAMES_SHOWN: usize = 6;
 
 /// Log debug information about an Anthropic Messages API request.
 /// Never panics — JSON parse failures are logged as warnings.
@@ -468,14 +467,9 @@ fn format_response_body_vv(
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Format tool names for display: up to TOOL_NAMES_SHOWN, then "... +N more".
+/// Format tool names for display: all names joined with ", ".
 fn format_tool_names(names: &[&str]) -> String {
-    if names.len() <= TOOL_NAMES_SHOWN {
-        names.join(", ")
-    } else {
-        let shown = &names[..TOOL_NAMES_SHOWN];
-        format!("{}, ... +{} more", shown.join(", "), names.len() - TOOL_NAMES_SHOWN)
-    }
+    names.join(", ")
 }
 
 /// Truncate string to max_len chars with "..." suffix if needed.
@@ -769,24 +763,24 @@ mod tests {
     }
 
     #[test]
-    fn test_format_tool_names_exactly_six() {
-        let names: Vec<&str> = vec!["a", "b", "c", "d", "e", "f"];
-        assert_eq!(format_tool_names(&names), "a, b, c, d, e, f");
+    fn test_format_tool_names_empty() {
+        let names: Vec<&str> = vec![];
+        assert_eq!(format_tool_names(&names), "");
     }
 
     #[test]
-    fn test_format_tool_names_seven() {
-        let names: Vec<&str> = vec!["a", "b", "c", "d", "e", "f", "g"];
-        let result = format_tool_names(&names);
-        assert_eq!(result, "a, b, c, d, e, f, ... +1 more");
+    fn test_format_tool_names_single() {
+        let names: Vec<&str> = vec!["search"];
+        assert_eq!(format_tool_names(&names), "search");
     }
 
     #[test]
-    fn test_format_tool_names_many() {
+    fn test_format_tool_names_many_shows_all() {
         let names: Vec<&str> = vec!["a", "b", "c", "d", "e", "f", "g", "h", "i", "j"];
         let result = format_tool_names(&names);
-        assert!(result.contains("a, b, c, d, e, f"));
-        assert!(result.contains("+4 more"));
+        assert_eq!(result, "a, b, c, d, e, f, g, h, i, j");
+        assert!(!result.contains("..."));
+        assert!(!result.contains("more"));
     }
 
     #[test]
