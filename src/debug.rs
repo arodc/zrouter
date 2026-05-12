@@ -183,47 +183,14 @@ pub fn log_response(trace_id: &uuid::Uuid, model: &str, level: &DebugLevel, body
         return;
     }
 
-    // Diagnostic: log raw body details before parsing
-    let body_len = body.len();
-    let preview_end = body.len().min(500);
-    let preview = &body[..preview_end];
-    let tail_start = body.len().saturating_sub(500);
-    let tail = if tail_start > 0 { &body[tail_start..] } else { "" };
-
-    tracing::info!(
-        trace_id = %trace_id,
-        model = model,
-        body_len = body_len,
-        "{ANSI_YELLOW}{trace_id} ack{ANSI_RESET} response raw body | len: {body_len}\n\
-         {UUID_INDENT}preview: {preview}\n\
-         {UUID_INDENT}tail: {tail}",
-        trace_id = trace_id,
-        body_len = body_len,
-        preview = preview,
-        tail = tail,
-    );
-
     let val: serde_json::Value = match serde_json::from_str(body) {
-        Ok(v) => {
-            tracing::info!(
-                trace_id = %trace_id,
-                parse_result = "parsed as JSON",
-                "response parse: JSON",
-            );
-            v
-        }
+        Ok(v) => v,
         Err(json_err) => {
             // Try SSE: body may contain multiple `data: {...}` lines with
             // optional `event: ...` lines. We merge ALL events to reconstruct
             // stop_reason, content blocks, and usage from the full stream.
             if body.contains("data: ") || body.contains("data:") {
-                if let Some((v, event_count)) = merge_sse_events(body) {
-                    tracing::info!(
-                        trace_id = %trace_id,
-                        parse_result = format!("parsed as SSE (merged {} events)", event_count),
-                        event_count = event_count,
-                        "response parse: SSE",
-                    );
+                if let Some((v, _event_count)) = merge_sse_events(body) {
                     log_response_parsed(trace_id, model, level, &v);
                     return;
                 }
@@ -447,7 +414,7 @@ fn log_response_parsed(
 
     // vv mode: append detailed content blocks to same message
     if level == &DebugLevel::Vv {
-        let detail = format_response_body_vv(trace_id, model, val, stop_reason, content_blocks, &usage_str);
+        let detail = format_response_body_vv(trace_id, content_blocks);
         msg = format!("{}{}{}", msg, VV_SEPARATOR, detail);
     }
 
@@ -577,18 +544,12 @@ fn format_request_body_vv(
 
 fn format_response_body_vv(
     trace_id: &uuid::Uuid,
-    _model: &str,
-    val: &serde_json::Value,
-    stop_reason: &str,
     content_blocks: Option<&Vec<serde_json::Value>>,
-    usage_str: &str,
 ) -> String {
     let mut lines = vec![format!(
         "{ANSI_YELLOW}{trace_id} ack{ANSI_RESET} DEBUG[vv] response body",
         trace_id = trace_id,
     )];
-
-    lines.push(format!("{UUID_INDENT}stop_reason: {stop_reason}"));
 
     if let Some(blocks) = content_blocks {
         for (i, block) in blocks.iter().enumerate() {
@@ -600,10 +561,9 @@ fn format_response_body_vv(
                         .and_then(|t| t.as_str())
                         .unwrap_or("");
                     lines.push(format!(
-                        "{UUID_INDENT}content[{}] text: {:?} ({} chars)",
+                        "{UUID_INDENT}content[{}] text: {}",
                         i,
-                        truncate_str(text, TEXT_PREVIEW_LEN),
-                        text.len()
+                        truncate_str(text, TEXT_PREVIEW_LEN)
                     ));
                 }
                 "tool_use" => {
@@ -626,11 +586,6 @@ fn format_response_body_vv(
             }
         }
     }
-
-    lines.push(format!("{UUID_INDENT}usage: {usage_str}"));
-
-    // Omit the unused `val` warning — val is kept for potential future field extraction
-    let _ = val;
 
     lines.join("\n")
 }
@@ -1272,18 +1227,13 @@ data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_d
         });
 
         let blocks = val.get("content").and_then(|c| c.as_array()).unwrap();
-        let detail = format_response_body_vv(
-            &trace_id,
-            "claude-sonnet-4-20250514",
-            &val,
-            "tool_use",
-            Some(blocks),
-            "input=28450, output=342",
-        );
+        let detail = format_response_body_vv(&trace_id, Some(blocks));
 
         assert!(detail.contains("content[0] text:"));
         assert!(detail.contains("content[1] tool_use: read_file"));
         assert!(detail.contains("content[2] text:"));
+        assert!(!detail.contains("stop_reason:"));
+        assert!(!detail.contains("usage:"));
         assert!(!detail.contains("{\n")); // no raw JSON
     }
 
@@ -1328,32 +1278,4 @@ data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_d
         assert_eq!(result, "null");
     }
 
-    // --- Diagnostic logging tests ---
-
-    #[test]
-    fn test_log_response_raw_body_diagnostic_json() {
-        let trace_id = make_trace_id();
-        let body = serde_json::json!({
-            "type": "message",
-            "stop_reason": "end_turn",
-            "content": [{"type": "text", "text": "Hello"}],
-            "usage": {"input_tokens": 100, "output_tokens": 20},
-        });
-        let body_str = serde_json::to_string(&body).unwrap();
-        // Should log raw body + parse result "parsed as JSON"
-        log_response(&trace_id, "test", &DebugLevel::V, &body_str);
-    }
-
-    #[test]
-    fn test_log_response_raw_body_diagnostic_sse() {
-        let trace_id = make_trace_id();
-        let sse = "\
-event: message_start\n\
-data: {\"type\":\"message_start\"}\n\
-\n\
-data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":5}}\n\
-\n";
-        // Should log raw body + parse result "parsed as SSE (merged N events)"
-        log_response(&trace_id, "test", &DebugLevel::V, sse);
-    }
 }

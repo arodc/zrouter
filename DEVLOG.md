@@ -1,5 +1,14 @@
 # ZRouter Development Log
 
+## 2026-05-12 — Fix ANSI colors, remove body diagnostics, clean up vv response format
+
+- **`src/logging.rs`**: Added `.with_ansi(true)` to the compact text format builder. Without this, `tracing_subscriber` uses its default (which depends on whether stdout is a TTY), and ANSI escape codes like `\x1b[33m` were rendered as literal text in the debug output, breaking visual indentation. JSON format path unchanged.
+- **`src/debug.rs`**: Removed two diagnostic log lines from `log_response` that were added during SSE parsing development:
+  1. The `"response raw body | len: ..."` info log with preview/tail
+  2. The `"response parse: SSE"` / `"response parse: JSON"` info log
+  Kept the `"DEBUG: unable to parse response body"` warn log for actual failures.
+- **`src/debug.rs`**: Simplified `format_response_body_vv` to show only content blocks, matching the request's message-by-message layout. Removed `stop_reason` and `usage` from vv body (both already appear in the v-mode summary line above). Text blocks now show plain text instead of debug-quoted format. Updated function signature (removed unused `_model`, `val`, `stop_reason`, `usage_str` params). Removed 2 diagnostic tests, updated 1 vv-format test. Total: 86 tests (was 88).
+
 ## 2026-05-12 — Suppress redundant logs when route debug is enabled
 
 - **`src/server.rs`**: When a route has `debug` set to `V` or `Vv`, the debug output is richer than the standard request/response log lines. Wrapped three log statements in `if route.debug == DebugLevel::None` guards:

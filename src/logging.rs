@@ -40,6 +40,7 @@ pub fn init(config: &LoggingConfig) {
             tracing_subscriber::fmt()
                 .with_env_filter(filter)
                 .compact()
+                .with_ansi(true)
                 .with_target(false)
                 .with_level(true)
                 .with_file(false)
