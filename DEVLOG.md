@@ -1,5 +1,12 @@
 # ZRouter Development Log
 
+## 2026-05-12 — Suppress redundant logs when route debug is enabled
+
+- **`src/server.rs`**: When a route has `debug` set to `V` or `Vv`, the debug output is richer than the standard request/response log lines. Wrapped three log statements in `if route.debug == DebugLevel::None` guards:
+  1. `"Request received"` info log (moved after route resolution so `route.debug` is available)
+  2. `"Request completed"` info log
+  3. `"All providers exhausted"` warn log (fallback executor already logs detailed per-provider error info)
+
 ## 2026-05-12 — Debug output: remove redundant headers, yellow UUID, indent after dash
 
 - **`src/debug.rs`**: Removed `model:`, `trace_id:` from all debug header lines (redundant with surrounding server logs). UUID+req/ack prefix now colored ANSI yellow. All debug content indented 9 spaces (after first '-' in UUID pattern). Updated all format string tests.

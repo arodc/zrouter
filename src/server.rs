@@ -208,8 +208,6 @@ async fn handle_request(
         }
     };
 
-    tracing::info!(trace_id = %trace_id, model = %model, "Request received");
-
     let route = match router::resolve_route(&state.config.route, &model) {
         Some(r) => r,
         None => {
@@ -220,6 +218,10 @@ async fn handle_request(
             );
         }
     };
+
+    if route.debug == DebugLevel::None {
+        tracing::info!(trace_id = %trace_id, model = %model, "Request received");
+    }
 
     let fallback_config = &state.config.fallback;
 
@@ -255,13 +257,15 @@ async fn handle_request(
 
     match result {
         Ok(fallback_result) => {
-            tracing::info!(
-                trace_id = %trace_id,
-                provider = %fallback_result.provider_name,
-                model = %model,
-                status = fallback_result.status,
-                "Request completed"
-            );
+            if route.debug == DebugLevel::None {
+                tracing::info!(
+                    trace_id = %trace_id,
+                    provider = %fallback_result.provider_name,
+                    model = %model,
+                    status = fallback_result.status,
+                    "Request completed"
+                );
+            }
 
             // Per-route debug logging (response side)
             if route.debug != DebugLevel::None {
@@ -278,7 +282,9 @@ async fn handle_request(
                 .body(fallback_result.body)
         }
         Err(error_json) => {
-            tracing::warn!(trace_id = %trace_id, model = %model, "All providers exhausted");
+            if route.debug == DebugLevel::None {
+                tracing::warn!(trace_id = %trace_id, model = %model, "All providers exhausted");
+            }
             Response::builder()
                 .status(StatusCode::SERVICE_UNAVAILABLE)
                 .header("content-type", "application/json")
