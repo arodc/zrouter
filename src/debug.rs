@@ -200,13 +200,14 @@ pub fn log_response(trace_id: &uuid::Uuid, model: &str, level: &DebugLevel, body
         }
         Err(json_err) => {
             // Try SSE: body may contain multiple `data: {...}` lines with
-            // optional `event: ...` lines. We want the LAST complete JSON
-            // event because it has the final stop_reason and usage.
+            // optional `event: ...` lines. We merge ALL events to reconstruct
+            // stop_reason, content blocks, and usage from the full stream.
             if body.contains("data: ") || body.contains("data:") {
-                if let Some(v) = extract_last_sse_json(body) {
+                if let Some((v, event_count)) = merge_sse_events(body) {
                     tracing::info!(
                         trace_id = %trace_id,
-                        parse_result = "parsed as SSE (last event)",
+                        parse_result = format!("parsed as SSE (merged {} events)", event_count),
+                        event_count = event_count,
                         "response parse: SSE",
                     );
                     log_response_parsed(trace_id, model, level, &v);
@@ -232,45 +233,121 @@ pub fn log_response(trace_id: &uuid::Uuid, model: &str, level: &DebugLevel, body
     log_response_parsed(trace_id, model, level, &val);
 }
 
-/// Extract the last valid JSON object from SSE `data:` lines.
+/// Merge all SSE `data:` events into a synthetic response object.
 ///
-/// SSE format supports lines like:
-/// ```text
-/// event: message_start
-/// data: {"type":"message_start",...}
+/// Anthropic streaming spreads response data across multiple events:
+/// - `message_start` → usage (input_tokens)
+/// - `content_block_start/delta/stop` → content blocks (text, thinking)
+/// - `message_delta` → stop_reason, usage (output_tokens)
+/// - `message_stop` → no useful data
 ///
-/// event: content_block_delta
-/// data: {"type":"content_block_delta",...}
-///
-/// data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},...}
-/// ```
-///
-/// We iterate all `data:` lines and return the last one that parses as JSON.
-fn extract_last_sse_json(body: &str) -> Option<serde_json::Value> {
-    let mut last_valid: Option<serde_json::Value> = None;
+/// Returns `(merged_value, event_count)` or `None` if no valid data events found.
+fn merge_sse_events(body: &str) -> Option<(serde_json::Value, usize)> {
+    let mut stop_reason = "unknown".to_string();
+    let mut input_tokens: Option<u64> = None;
+    let mut output_tokens: Option<u64> = None;
+    let mut content_blocks: Vec<serde_json::Value> = Vec::new();
+    let mut current_block_type: Option<String> = None;
+    let mut current_block_text = String::new();
+
+    let mut event_count: usize = 0;
 
     for line in body.lines() {
-        let trimmed = line.trim();
-        // Skip event: lines and empty lines
-        if trimmed.is_empty() || trimmed.starts_with("event:") {
-            continue;
-        }
-        if let Some(json_str) = trimmed.strip_prefix("data: ") {
-            if let Ok(v) = serde_json::from_str(json_str.trim()) {
-                last_valid = Some(v);
-            }
-        } else if let Some(json_str) = trimmed.strip_prefix("data:") {
-            // Handle "data:" without trailing space
-            let s = json_str.trim();
-            if !s.is_empty() {
-                if let Ok(v) = serde_json::from_str(s) {
-                    last_valid = Some(v);
+        let json_str = match line.strip_prefix("data: ") {
+            Some(s) => s,
+            None => match line.strip_prefix("data:") {
+                Some(s) => s,
+                None => continue,
+            },
+        };
+
+        let event: serde_json::Value = match serde_json::from_str(json_str) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+
+        event_count += 1;
+
+        match event["type"].as_str() {
+            Some("message_start") => {
+                if let Some(u) = event["message"]["usage"].as_object() {
+                    input_tokens = u.get("input_tokens").and_then(|v| v.as_u64());
                 }
             }
+            Some("content_block_start") => {
+                let cb = &event["content_block"];
+                current_block_type = cb["type"].as_str().map(|s| s.to_string());
+                current_block_text = cb["text"].as_str().unwrap_or("").to_string();
+            }
+            Some("content_block_delta") => {
+                let delta = &event["delta"];
+                if delta["type"] == "thinking_delta" {
+                    if let Some(t) = delta["thinking"].as_str() {
+                        current_block_text.push_str(t);
+                    }
+                } else if delta["type"] == "text_delta" {
+                    if let Some(t) = delta["text"].as_str() {
+                        current_block_text.push_str(t);
+                    }
+                }
+            }
+            Some("content_block_stop") => {
+                if let Some(ref bt) = current_block_type {
+                    let block = match bt.as_str() {
+                        "text" | "thinking" => {
+                            serde_json::json!({"type": bt, "text": current_block_text})
+                        }
+                        _ => serde_json::json!({"type": bt}),
+                    };
+                    content_blocks.push(block);
+                }
+                current_block_type = None;
+                current_block_text.clear();
+            }
+            Some("message_delta") => {
+                if let Some(sr) = event["delta"]["stop_reason"].as_str() {
+                    stop_reason = sr.to_string();
+                }
+                if let Some(u) = event["usage"].as_object() {
+                    if let Some(ot) = u.get("output_tokens").and_then(|v| v.as_u64()) {
+                        output_tokens = Some(ot);
+                    }
+                }
+            }
+            _ => {}
         }
     }
 
-    last_valid
+    // Flush any block that was started but never closed (malformed stream)
+    if let Some(ref bt) = current_block_type {
+        let block = match bt.as_str() {
+            "text" | "thinking" => serde_json::json!({"type": bt, "text": current_block_text}),
+            _ => serde_json::json!({"type": bt}),
+        };
+        content_blocks.push(block);
+    }
+
+    if event_count == 0 {
+        return None;
+    }
+
+    let mut usage = serde_json::Map::new();
+    if let Some(i) = input_tokens {
+        usage.insert("input_tokens".to_string(), serde_json::json!(i));
+    }
+    if let Some(o) = output_tokens {
+        usage.insert("output_tokens".to_string(), serde_json::json!(o));
+    }
+
+    Some((
+        serde_json::json!({
+            "type": "message",
+            "stop_reason": stop_reason,
+            "content": content_blocks,
+            "usage": usage,
+        }),
+        event_count,
+    ))
 }
 
 fn log_response_parsed(
@@ -812,6 +889,7 @@ mod tests {
     #[test]
     fn test_log_response_sse_body() {
         let trace_id = make_trace_id();
+        // Single SSE data line — merge produces defaults for missing fields
         let sse = r#"data: {"type":"message","stop_reason":"end_turn","content":[],"usage":{"input_tokens":100}}"#;
         log_response(&trace_id, "test", &DebugLevel::V, sse);
     }
@@ -821,8 +899,8 @@ mod tests {
         let trace_id = make_trace_id();
         // Simulate a streaming response with multiple SSE events
         let sse = "\
-event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\"}}\n\n\
-event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"text\":\"Hi\"}}\n\n\
+event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"usage\":{\"input_tokens\":50}}}\n\n\
+event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"Hi\"}}\n\n\
 event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":5}}\n\n";
         log_response(&trace_id, "test", &DebugLevel::V, sse);
     }
@@ -841,47 +919,153 @@ data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"},\"usa
     }
 
     #[test]
-    fn test_extract_last_sse_json_single() {
+    fn test_merge_sse_single_event() {
         let sse = r#"data: {"type":"message","stop_reason":"end_turn"}"#;
-        let v = extract_last_sse_json(sse).unwrap();
-        assert_eq!(v["stop_reason"], "end_turn");
+        let (v, count) = merge_sse_events(sse).unwrap();
+        assert_eq!(count, 1);
+        // Single event has no message_start/content_block/message_delta,
+        // so defaults apply: stop_reason="unknown", content=[], usage={}
+        assert_eq!(v["stop_reason"], "unknown");
     }
 
     #[test]
-    fn test_extract_last_sse_json_multiple() {
-        let sse = "\
-data: {\"type\":\"content_block_start\"}\n\
-\n\
-data: {\"type\":\"message_delta\",\"stop_reason\":\"end_turn\"}\n\
-\n";
-        let v = extract_last_sse_json(sse).unwrap();
-        assert_eq!(v["type"], "message_delta");
+    fn test_merge_sse_no_data_lines() {
+        let sse = "event: ping\n\n";
+        assert!(merge_sse_events(sse).is_none());
     }
 
     #[test]
-    fn test_extract_last_sse_json_with_event_lines() {
+    fn test_merge_sse_invalid_json_ignored() {
+        let sse = "data: [DONE]\n\ndata: {\"type\":\"message\"}\n\n";
+        let (v, count) = merge_sse_events(sse).unwrap();
+        assert_eq!(count, 1);
+        assert_eq!(v["type"], "message");
+    }
+
+    #[test]
+    fn test_merge_sse_full_streaming_response() {
         let sse = "\
 event: message_start\n\
-data: {\"type\":\"message_start\"}\n\
+data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"usage\":{\"input_tokens\":56,\"output_tokens\":0}}}\n\
+\n\
+event: content_block_start\n\
+data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"text\":\"\"}}\n\
+\n\
+event: content_block_delta\n\
+data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"Let me think\"}}\n\
+\n\
+event: content_block_stop\n\
+data: {\"type\":\"content_block_stop\",\"index\":0}\n\
+\n\
+event: content_block_start\n\
+data: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\
+\n\
+event: content_block_delta\n\
+data: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hello.\"}}\n\
+\n\
+event: content_block_delta\n\
+data: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\" World.\"}}\n\
+\n\
+event: content_block_stop\n\
+data: {\"type\":\"content_block_stop\",\"index\":1}\n\
 \n\
 event: message_delta\n\
-data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"}}\n\
+data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\",\"stop_sequence\":null},\"usage\":{\"input_tokens\":56,\"output_tokens\":39}}\n\
+\n\
+event: message_stop\n\
+data: {\"type\":\"message_stop\"}\n\
 \n";
-        let v = extract_last_sse_json(sse).unwrap();
-        assert_eq!(v["type"], "message_delta");
+
+        let (v, count) = merge_sse_events(sse).unwrap();
+
+        // 10 data lines total
+        assert_eq!(count, 10);
+
+        // stop_reason from message_delta
+        assert_eq!(v["stop_reason"], "end_turn");
+
+        // content blocks: thinking + text
+        let blocks = v["content"].as_array().unwrap();
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0]["type"], "thinking");
+        assert_eq!(blocks[0]["text"], "Let me think");
+        assert_eq!(blocks[1]["type"], "text");
+        assert_eq!(blocks[1]["text"], "Hello. World.");
+
+        // usage from message_start + message_delta
+        assert_eq!(v["usage"]["input_tokens"], 56);
+        assert_eq!(v["usage"]["output_tokens"], 39);
     }
 
     #[test]
-    fn test_extract_last_sse_json_no_data_lines() {
-        let sse = "event: ping\n\n";
-        assert!(extract_last_sse_json(sse).is_none());
+    fn test_merge_sse_tool_use_response() {
+        let sse = "\
+event: message_start\n\
+data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_2\",\"usage\":{\"input_tokens\":100,\"output_tokens\":0}}}\n\
+\n\
+event: content_block_start\n\
+data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\
+\n\
+event: content_block_delta\n\
+data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"I'll check.\"}}\n\
+\n\
+event: content_block_stop\n\
+data: {\"type\":\"content_block_stop\",\"index\":0}\n\
+\n\
+event: content_block_start\n\
+data: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"id\":\"tu_1\",\"name\":\"read_file\",\"input\":{}}}\n\
+\n\
+event: content_block_stop\n\
+data: {\"type\":\"content_block_stop\",\"index\":1}\n\
+\n\
+event: message_delta\n\
+data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"},\"usage\":{\"output_tokens\":50}}\n\
+\n";
+
+        let (v, count) = merge_sse_events(sse).unwrap();
+        assert_eq!(count, 7);
+        assert_eq!(v["stop_reason"], "tool_use");
+
+        let blocks = v["content"].as_array().unwrap();
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0]["type"], "text");
+        assert_eq!(blocks[0]["text"], "I'll check.");
+        // tool_use block has no text field, just type
+        assert_eq!(blocks[1]["type"], "tool_use");
+
+        assert_eq!(v["usage"]["input_tokens"], 100);
+        assert_eq!(v["usage"]["output_tokens"], 50);
     }
 
     #[test]
-    fn test_extract_last_sse_json_invalid_json_ignored() {
-        let sse = "data: [DONE]\n\ndata: {\"type\":\"message\"}\n\n";
-        let v = extract_last_sse_json(sse).unwrap();
-        assert_eq!(v["type"], "message");
+    fn test_merge_sse_malformed_unclosed_block() {
+        // Block started but never closed (stream interrupted)
+        let sse = "\
+data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\
+data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"partial\"}}\n";
+
+        let (v, count) = merge_sse_events(sse).unwrap();
+        assert_eq!(count, 2);
+
+        // Unclosed block should be flushed
+        let blocks = v["content"].as_array().unwrap();
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0]["type"], "text");
+        assert_eq!(blocks[0]["text"], "partial");
+    }
+
+    #[test]
+    fn test_merge_sse_empty_body() {
+        assert!(merge_sse_events("").is_none());
+    }
+
+    #[test]
+    fn test_merge_sse_only_message_stop() {
+        let sse = "data: {\"type\":\"message_stop\"}\n\n";
+        let (v, count) = merge_sse_events(sse).unwrap();
+        assert_eq!(count, 1);
+        assert_eq!(v["stop_reason"], "unknown");
+        assert!(v["content"].as_array().unwrap().is_empty());
     }
 
     #[test]
@@ -1154,7 +1338,7 @@ data: {\"type\":\"message_start\"}\n\
 \n\
 data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":5}}\n\
 \n";
-        // Should log raw body + parse result "parsed as SSE (last event)"
+        // Should log raw body + parse result "parsed as SSE (merged N events)"
         log_response(&trace_id, "test", &DebugLevel::V, sse);
     }
 }
