@@ -41,7 +41,7 @@ pub fn init(config: &LoggingConfig) {
                 .with_env_filter(filter)
                 .compact()
                 .with_target(false)
-                .with_level(false)
+                .with_level(true)
                 .with_file(false)
                 .with_line_number(false)
                 .with_timer(LocalTimer)

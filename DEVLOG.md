@@ -1,5 +1,16 @@
 # ZRouter Development Log
 
+## 2026-05-12 — Restore log level, colon-aligned indent, response diagnostics
+
+- **`src/logging.rs`**: Restored log level display in compact text format. Changed `with_level(false)` to `with_level(true)`. Format is now `HH:MM:SS LEVEL message` (e.g. `12:34:56 INFO Request received`). JSON format unchanged.
+- **`src/debug.rs`**: Three changes:
+  1. **Colon-aligned indentation**: New `indent_after(parent_label, child, value)` helper computes indent as `parent_label.len() + 1`. Children of `messages:` (9 chars) indent 10 spaces; children of `tools:` (6 chars) indent 7 spaces. Applied to all v-mode and v-mode request/response output: message sub-counts (user/assistant/tool_result), tool sub-fields (max_tokens/context_size), content_blocks sub-counts (text/tool_use).
+  2. **Response raw body diagnostics**: `log_response` now emits an INFO log before parsing with body length, first 500 chars preview, and last 500 chars tail. After parsing, logs which path was taken: "parsed as JSON", "parsed as SSE (last event)", "empty body", or "parse failed" (with json_error and has_data_prefix fields).
+  3. **vv-mode tool_result fix**: Tool result messages in vv-mode now use consistent `"  messages[N] user (tool_result: X blocks): Y chars"` format.
+- Tests added: `test_indent_after_basic`, `test_indent_after_tools`, `test_indent_after_short_label`, `test_log_response_raw_body_diagnostic_json`, `test_log_response_raw_body_diagnostic_sse`. Total: 85 tests (was 80).
+
+### Earlier logs (summarized)
+
 ## 2026-05-12 — Debug log format overhaul: compact output, SSE fix, merged messages
 
 - **`src/logging.rs`**: Text format changed to `HH:MM:SS message` — stripped level, target, module, file, line number, thread id. Timer format simplified from `MM/DD/HH:MM:SS` to `HH:MM:SS`. JSON format unchanged.

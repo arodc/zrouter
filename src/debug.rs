@@ -1,3 +1,5 @@
+use std::fmt::Display;
+
 use crate::config::DebugLevel;
 
 const TEXT_PREVIEW_LEN: usize = 200;
@@ -5,6 +7,16 @@ const TOOL_NAMES_SHOWN: usize = 6;
 
 /// Separator between v-mode summary and vv-mode detail in a merged log line.
 const VV_SEPARATOR: &str = "\n---\n";
+
+/// Format a child line indented to align after the parent label's value.
+/// The indent width is `parent_label.len() + 1` (label includes the colon,
+/// +1 for the space after it).
+/// Example: `indent_after("messages:", "user:", &2)`
+/// → `"          user: 2"` (10 spaces + "user: 2")
+fn indent_after(parent_label: &str, child: &str, value: &dyn Display) -> String {
+    let indent = parent_label.len() + 1;
+    format!("{}{} {}", " ".repeat(indent), child, value)
+}
 
 /// Log debug information about an Anthropic Messages API request.
 /// Never panics — JSON parse failures are logged as warnings.
@@ -94,36 +106,38 @@ pub fn log_request(trace_id: &uuid::Uuid, model: &str, level: &DebugLevel, body:
         "absent".to_string()
     };
 
-    let mut msg = format!(
+    let msg = format!(
         "{} req DEBUG[{}] request | model: {} | trace_id: {}\n\
-         \x20 messages: {}\n\
-         \x20   user: {}\n\
-         \x20   assistant: {}\n\
-         \x20   tool_result: {}\n\
-         \x20 system: {}\n\
-         \x20 tools: {} [{}]\n\
-         \x20 max_tokens: {}\n\
-         \x20 context_size: ~{} chars",
+         messages: {}\n\
+         {}\n\
+         {}\n\
+         {}\n\
+         system: {}\n\
+         tools: {} [{}]\n\
+         {}\n\
+         {}",
         trace_id,
         level_tag,
         model,
         trace_id,
         msg_count,
-        user_count,
-        assistant_count,
-        tool_result_count,
+        indent_after("messages:", "user:", &user_count),
+        indent_after("messages:", "assistant:", &assistant_count),
+        indent_after("messages:", "tool_result:", &tool_result_count),
         system_line,
         tool_count,
         format_tool_names(&tool_names),
-        max_tokens,
-        content_chars,
+        indent_after("tools:", "max_tokens:", &max_tokens),
+        indent_after("tools:", "context_size:", &format!("~{} chars", content_chars)),
     );
 
     // vv mode: append detailed body to same message
-    if level == &DebugLevel::Vv {
+    let msg = if level == &DebugLevel::Vv {
         let detail = format_request_body_vv(trace_id, model, &val, &tool_names);
-        msg = format!("{}{}{}", msg, VV_SEPARATOR, detail);
-    }
+        format!("{}{}{}", msg, VV_SEPARATOR, detail)
+    } else {
+        msg
+    };
 
     tracing::info!(
         trace_id = %trace_id,
@@ -142,41 +156,72 @@ pub fn log_response(trace_id: &uuid::Uuid, model: &str, level: &DebugLevel, body
     }
 
     if body.is_empty() || body.trim().is_empty() {
-        let msg = format!(
-            "{} ack DEBUG[v] response | model: {} | trace_id: {}\n\
-             \x20 stop_reason: empty\n\
-             \x20 content_blocks: 0\n\
-             \x20 usage: not available",
-            trace_id, model, trace_id
-        );
         tracing::info!(
             trace_id = %trace_id,
             model = model,
             debug_level = "v",
-            "{}",
-            msg,
+            body_len = 0usize,
+            parse_result = "empty body",
+            "{} ack DEBUG[v] response | model: {} | trace_id: {}\n\
+             stop_reason: empty\n\
+             content_blocks: 0\n\
+             usage: not available",
+            trace_id, model, trace_id,
         );
         return;
     }
 
+    // Diagnostic: log raw body details before parsing
+    let body_len = body.len();
+    let preview_end = body.len().min(500);
+    let preview = &body[..preview_end];
+    let tail_start = body.len().saturating_sub(500);
+    let tail = if tail_start > 0 { &body[tail_start..] } else { "" };
+
+    tracing::info!(
+        trace_id = %trace_id,
+        model = model,
+        body_len = body_len,
+        "response raw body | trace_id: {} | len: {}\n  preview: {}\n  tail: {}",
+        trace_id,
+        body_len,
+        preview,
+        tail,
+    );
+
     let val: serde_json::Value = match serde_json::from_str(body) {
-        Ok(v) => v,
-        Err(_) => {
+        Ok(v) => {
+            tracing::info!(
+                trace_id = %trace_id,
+                parse_result = "parsed as JSON",
+                "response parse: JSON",
+            );
+            v
+        }
+        Err(json_err) => {
             // Try SSE: body may contain multiple `data: {...}` lines with
             // optional `event: ...` lines. We want the LAST complete JSON
             // event because it has the final stop_reason and usage.
-            if body.contains("data: ") {
+            if body.contains("data: ") || body.contains("data:") {
                 if let Some(v) = extract_last_sse_json(body) {
+                    tracing::info!(
+                        trace_id = %trace_id,
+                        parse_result = "parsed as SSE (last event)",
+                        "response parse: SSE",
+                    );
                     log_response_parsed(trace_id, model, level, &v);
                     return;
                 }
             }
-            // Final fallback: warn with body preview
+            // Final fallback: warn with body preview and specific error
             tracing::warn!(
                 trace_id = %trace_id,
                 model = model,
                 body_len = body.len(),
                 body_preview = %&body[..body.len().min(80)],
+                json_error = %json_err,
+                has_data_prefix = body.contains("data:"),
+                parse_result = "parse failed",
                 "{} ack DEBUG: unable to parse response body",
                 trace_id
             );
@@ -279,28 +324,32 @@ fn log_response_parsed(
 
     let level_tag = if level == &DebugLevel::Vv { "vv" } else { "v" };
 
-    // Build v-mode summary
+    // Build v-mode summary with colon-aligned indentation
     let mut lines = vec![
         format!(
             "{} ack DEBUG[{}] response | model: {} | trace_id: {}",
             trace_id, level_tag, model, trace_id
         ),
-        format!("  stop_reason: {}", stop_reason),
-        format!("  content_blocks: {}", block_count),
+        format!("stop_reason: {}", stop_reason),
+        format!("content_blocks: {}", block_count),
     ];
 
-    // Sub-counts for content blocks
+    // Sub-counts for content blocks — align after "content_blocks:"
     if block_count > 0 {
         if text_count > 0 {
-            lines.push(format!("    text: {}", text_count));
+            lines.push(indent_after("content_blocks:", "text:", &text_count));
         }
         if tool_use_count > 0 {
             let names_str = format_tool_names(&tool_call_names);
-            lines.push(format!("    tool_use: {} [{}]", tool_use_count, names_str));
+            lines.push(indent_after(
+                "content_blocks:",
+                "tool_use:",
+                &format!("{} [{}]", tool_use_count, names_str),
+            ));
         }
     }
 
-    lines.push(format!("  usage: {}", usage_str));
+    lines.push(format!("usage: {}", usage_str));
 
     let mut msg = lines.join("\n");
 
@@ -356,9 +405,7 @@ fn format_request_body_vv(
                                 .sum();
                             lines.push(format!(
                                 "  messages[{}] user (tool_result: {} blocks): {} chars",
-                                i,
-                                tool_result_count,
-                                total_len
+                                i, tool_result_count, total_len
                             ));
                             continue;
                         }
@@ -624,6 +671,31 @@ mod tests {
     fn make_trace_id() -> uuid::Uuid {
         uuid::Uuid::new_v4()
     }
+
+    // --- indent_after tests ---
+
+    #[test]
+    fn test_indent_after_basic() {
+        let result = indent_after("messages:", "user:", &2);
+        // "messages:" = 9 chars, +1 = 10 spaces
+        assert_eq!(result, "          user: 2");
+    }
+
+    #[test]
+    fn test_indent_after_tools() {
+        let result = indent_after("tools:", "max_tokens:", &32000);
+        // "tools:" = 6 chars, +1 = 7 spaces
+        assert_eq!(result, "       max_tokens: 32000");
+    }
+
+    #[test]
+    fn test_indent_after_short_label() {
+        let result = indent_after("x:", "y:", &"hello");
+        // "x:" = 2 chars, +1 = 3 spaces
+        assert_eq!(result, "   y: hello");
+    }
+
+    // --- Existing tests ---
 
     #[test]
     fn test_log_request_parses_messages_and_tools() {
@@ -1055,5 +1127,34 @@ data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"}}\n\
         let val = serde_json::json!(null);
         let result = format_compact_json(&val);
         assert_eq!(result, "null");
+    }
+
+    // --- Diagnostic logging tests ---
+
+    #[test]
+    fn test_log_response_raw_body_diagnostic_json() {
+        let trace_id = make_trace_id();
+        let body = serde_json::json!({
+            "type": "message",
+            "stop_reason": "end_turn",
+            "content": [{"type": "text", "text": "Hello"}],
+            "usage": {"input_tokens": 100, "output_tokens": 20},
+        });
+        let body_str = serde_json::to_string(&body).unwrap();
+        // Should log raw body + parse result "parsed as JSON"
+        log_response(&trace_id, "test", &DebugLevel::V, &body_str);
+    }
+
+    #[test]
+    fn test_log_response_raw_body_diagnostic_sse() {
+        let trace_id = make_trace_id();
+        let sse = "\
+event: message_start\n\
+data: {\"type\":\"message_start\"}\n\
+\n\
+data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":5}}\n\
+\n";
+        // Should log raw body + parse result "parsed as SSE (last event)"
+        log_response(&trace_id, "test", &DebugLevel::V, sse);
     }
 }
