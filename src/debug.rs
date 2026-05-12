@@ -424,13 +424,13 @@ fn format_request_body_vv(
                                 .map(|b| block_content_len(b.get("content")))
                                 .sum();
                             lines.push(format!(
-                                "{UUID_INDENT}messages[{}] user (tool_result: {} blocks): {} chars",
+                                "{UUID_INDENT}[{}] user (tool_result: {} blocks): {} chars",
                                 i, tool_result_count, total_len
                             ));
                             continue;
                         }
                     }
-                    let label = format!("{UUID_INDENT}messages[{}] user:", i);
+                    let label = format!("{UUID_INDENT}[{}] user:", i);
                     let text = content_text(content);
                     lines.push(format_multiline(&label, &text));
                 }
@@ -446,12 +446,12 @@ fn format_request_body_vv(
                             let text_preview = extract_text_from_blocks(arr);
                             if text_preview.is_empty() {
                                 lines.push(format!(
-                                    "{UUID_INDENT}messages[{}] assistant (tool_use: [{}])",
+                                    "{UUID_INDENT}[{}] assistant (tool_use: [{}])",
                                     i,
                                     tool_uses.join(", ")
                                 ));
                             } else {
-                                let label = format!("{UUID_INDENT}messages[{}] assistant:", i);
+                                let label = format!("{UUID_INDENT}[{}] assistant:", i);
                                 let mut ml = format_multiline(&label, &text_preview);
                                 ml.push_str(&format!(" (tool_use: [{}])", tool_uses.join(", ")));
                                 lines.push(ml);
@@ -459,12 +459,12 @@ fn format_request_body_vv(
                             continue;
                         }
                     }
-                    let label = format!("{UUID_INDENT}messages[{}] assistant:", i);
+                    let label = format!("{UUID_INDENT}[{}] assistant:", i);
                     let text = content_text(content);
                     lines.push(format_multiline(&label, &text));
                 }
                 _ => {
-                    let label = format!("{UUID_INDENT}messages[{}] {}:", i, role);
+                    let label = format!("{UUID_INDENT}[{}] {}:", i, role);
                     let text = content_text(content);
                     lines.push(format_multiline(&label, &text));
                 }
@@ -517,7 +517,7 @@ fn format_response_body_vv(
                         .and_then(|t| t.as_str())
                         .unwrap_or("");
                     lines.push(format!(
-                        "{UUID_INDENT}content[{}] text: {}",
+                        "{UUID_INDENT}[{}] text: {}",
                         i,
                         truncate_str(text, TEXT_PREVIEW_LEN)
                     ));
@@ -532,12 +532,12 @@ fn format_response_body_vv(
                         .map(|inp| format_compact_json(inp))
                         .unwrap_or_default();
                     lines.push(format!(
-                        "{UUID_INDENT}content[{}] tool_use: {} {}",
+                        "{UUID_INDENT}[{}] tool_use: {} {}",
                         i, name, input
                     ));
                 }
                 _ => {
-                    lines.push(format!("{UUID_INDENT}content[{}] {}: ...", i, block_type));
+                    lines.push(format!("{UUID_INDENT}[{}] {}: ...", i, block_type));
                 }
             }
         }
@@ -561,7 +561,7 @@ fn format_multiline(label: &str, text: &str) -> String {
     let indent_width = label.len() + 1; // after colon+space
     let indent = " ".repeat(indent_width);
     let lines: Vec<&str> = text.split('\n').collect();
-    let mut result = format!("{}\n{}", label, truncate_str(lines[0], TEXT_PREVIEW_LEN));
+    let mut result = format!("{} {}", label, truncate_str(lines[0], TEXT_PREVIEW_LEN));
     for line in &lines[1..] {
         result.push_str(&format!("\n{}{}", indent, truncate_str(line, TEXT_PREVIEW_LEN)));
     }
@@ -1104,7 +1104,7 @@ data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_d
     #[test]
     fn test_format_multiline_with_newlines() {
         let result = format_multiline("label:", "line1\nline2\nline3");
-        assert_eq!(result, "label:\nline1\n       line2\n       line3");
+        assert_eq!(result, "label: line1\n       line2\n       line3");
     }
 
     #[test]
@@ -1240,9 +1240,9 @@ data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_d
         let blocks = val.get("content").and_then(|c| c.as_array()).unwrap();
         let detail = format_response_body_vv(&trace_id, Some(blocks));
 
-        assert!(detail.contains("content[0] text:"));
-        assert!(detail.contains("content[1] tool_use: read_file"));
-        assert!(detail.contains("content[2] text:"));
+        assert!(detail.contains("[0] text:"));
+        assert!(detail.contains("[1] tool_use: read_file"));
+        assert!(detail.contains("[2] text:"));
         assert!(!detail.contains("stop_reason:"));
         assert!(!detail.contains("usage:"));
         assert!(!detail.contains("{\n")); // no raw JSON
@@ -1268,10 +1268,10 @@ data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_d
 
         let tool_names: Vec<&str> = vec!["read_file"];
         let detail = format_request_body_vv(&trace_id, "test", &body, &tool_names);
-        assert!(detail.contains("messages[0] user:"));
-        assert!(detail.contains("messages[1] assistant:"));
+        assert!(detail.contains("[0] user:"));
+        assert!(detail.contains("[1] assistant:"));
         assert!(detail.contains("tool_use: [read_file]"));
-        assert!(detail.contains("messages[2] user (tool_result: 1 blocks)"));
+        assert!(detail.contains("[2] user (tool_result: 1 blocks)"));
     }
 
     #[test]
