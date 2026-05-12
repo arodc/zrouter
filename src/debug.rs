@@ -569,14 +569,13 @@ fn format_multiline(label: &str, text: &str) -> String {
 }
 
 /// Format a tool name list with wrapping: `per_line` names per line.
-/// First line: `tools: {count} [Name1, Name2, ...]`
+/// First line: `tools: [Name1, Name2, ...]`
 /// Continuation lines indented to align with the first tool name after `[`.
 fn format_tool_list(names: &[&str], per_line: usize) -> String {
     if names.is_empty() {
-        return format!("{UUID_INDENT}tools: 0 []");
+        return format!("{UUID_INDENT}tools: []");
     }
-    let count = names.len();
-    let prefix = format!("tools: {} [", count);
+    let prefix = "tools: [";
     // Continuation indent = UUID_INDENT + spaces matching prefix width, so
     // tool names on wrapped lines align with the first tool name on line 1.
     let indent = format!("{}{}", UUID_INDENT, " ".repeat(prefix.len()));
@@ -1120,13 +1119,13 @@ data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_d
     #[test]
     fn test_format_tool_list_empty() {
         let result = format_tool_list(&[] as &[&str], 8);
-        assert_eq!(result, "                   tools: 0 []");
+        assert_eq!(result, "                   tools: []");
     }
 
     #[test]
     fn test_format_tool_list_few() {
         let result = format_tool_list(&["Bash", "Read"], 8);
-        assert!(result.contains("tools: 2 [Bash, Read]"));
+        assert!(result.contains("tools: [Bash, Read]"));
         assert!(!result.contains('\n'));
     }
 
@@ -1139,7 +1138,7 @@ data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_d
         // First line has 8, second line has 2
         let lines: Vec<&str> = result.split('\n').collect();
         assert_eq!(lines.len(), 2);
-        assert!(lines[0].contains("tools: 10 ["));
+        assert!(lines[0].contains("tools: ["));
         assert!(lines[0].contains("A, B, C, D, E, F, G, H"));
         assert!(lines[1].contains("I, J"));
         assert!(lines[1].ends_with(']'));
@@ -1218,7 +1217,7 @@ data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_d
             .filter_map(|t| t.get("name").and_then(|n| n.as_str()))
             .collect();
         let detail = format_request_body_vv(&trace_id, "claude-sonnet-4-20250514", &body, &tool_names);
-        assert!(detail.contains("tools: 2 [Bash, Read]"));
+        assert!(detail.contains("tools: [Bash, Read]"));
         assert!(!detail.contains("input_schema"));
         assert!(!detail.contains("description"));
     }
