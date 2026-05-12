@@ -1,5 +1,9 @@
 # ZRouter Development Log
 
+## 2026-05-12 — Debug output: remove redundant headers, yellow UUID, indent after dash
+
+- **`src/debug.rs`**: Removed `model:`, `trace_id:` from all debug header lines (redundant with surrounding server logs). UUID+req/ack prefix now colored ANSI yellow. All debug content indented 9 spaces (after first '-' in UUID pattern). Updated all format string tests.
+
 ## 2026-05-12 — Fix SSE response parsing: merge all events instead of using last event
 
 - **`src/debug.rs`**: Replaced `extract_last_sse_json` with `merge_sse_events(body) -> Option<(Value, usize)>`. The old function returned the last SSE event (always `message_stop` with no useful data). The new function iterates all `data:` lines and merges fields from `message_start` (input_tokens), `content_block_start/delta/stop` (assembled text/thinking content blocks), `message_delta` (stop_reason, output_tokens), and `message_stop` (skipped). Returns a synthetic message object plus event count. Also flushes unclosed blocks for interrupted streams.

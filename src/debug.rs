@@ -8,14 +8,28 @@ const TOOL_NAMES_SHOWN: usize = 6;
 /// Separator between v-mode summary and vv-mode detail in a merged log line.
 const VV_SEPARATOR: &str = "\n---\n";
 
+/// ANSI escape codes for terminal coloring.
+const ANSI_YELLOW: &str = "\x1b[33m";
+const ANSI_RESET: &str = "\x1b[0m";
+
+/// Indent width matching UUID first dash position (8 hex chars + 1 dash = 9).
+const UUID_INDENT: &str = "         ";
+
 /// Format a child line indented to align after the parent label's value.
-/// The indent width is `parent_label.len() + 1` (label includes the colon,
-/// +1 for the space after it).
+/// Prepends the UUID base indent (9 spaces) so all content lines start at
+/// the same column. The child indent width is `parent_label.len() + 1`
+/// (label includes the colon, +1 for the space after it).
 /// Example: `indent_after("messages:", "user:", &2)`
-/// → `"          user: 2"` (10 spaces + "user: 2")
+/// → `"          user: 2"` (9 base + 10 child = 19 spaces + "user: 2")
 fn indent_after(parent_label: &str, child: &str, value: &dyn Display) -> String {
-    let indent = parent_label.len() + 1;
-    format!("{}{} {}", " ".repeat(indent), child, value)
+    let child_indent = parent_label.len() + 1;
+    format!(
+        "{}{} {} {}",
+        UUID_INDENT,
+        " ".repeat(child_indent),
+        child,
+        value
+    )
 }
 
 /// Log debug information about an Anthropic Messages API request.
@@ -107,28 +121,26 @@ pub fn log_request(trace_id: &uuid::Uuid, model: &str, level: &DebugLevel, body:
     };
 
     let msg = format!(
-        "{} req DEBUG[{}] request | model: {} | trace_id: {}\n\
-         messages: {}\n\
-         {}\n\
-         {}\n\
-         {}\n\
-         system: {}\n\
-         tools: {} [{}]\n\
-         {}\n\
-         {}",
-        trace_id,
-        level_tag,
-        model,
-        trace_id,
-        msg_count,
-        indent_after("messages:", "user:", &user_count),
-        indent_after("messages:", "assistant:", &assistant_count),
-        indent_after("messages:", "tool_result:", &tool_result_count),
-        system_line,
-        tool_count,
-        format_tool_names(&tool_names),
-        indent_after("tools:", "max_tokens:", &max_tokens),
-        indent_after("tools:", "context_size:", &format!("~{} chars", content_chars)),
+        "{ANSI_YELLOW}{uuid} req{ANSI_RESET} DEBUG[{level_tag}] request\n\
+         {UUID_INDENT}messages: {msg_count}\n\
+         {user_line}\n\
+         {assistant_line}\n\
+         {tool_result_line}\n\
+         {UUID_INDENT}system: {system_line}\n\
+         {UUID_INDENT}tools: {tool_count} [{tool_names}]\n\
+         {max_tokens_line}\n\
+         {context_size_line}",
+        uuid = trace_id,
+        level_tag = level_tag,
+        msg_count = msg_count,
+        user_line = indent_after("messages:", "user:", &user_count),
+        assistant_line = indent_after("messages:", "assistant:", &assistant_count),
+        tool_result_line = indent_after("messages:", "tool_result:", &tool_result_count),
+        system_line = system_line,
+        tool_count = tool_count,
+        tool_names = format_tool_names(&tool_names),
+        max_tokens_line = indent_after("tools:", "max_tokens:", &max_tokens),
+        context_size_line = indent_after("tools:", "context_size:", &format!("~{} chars", content_chars)),
     );
 
     // vv mode: append detailed body to same message
@@ -162,11 +174,11 @@ pub fn log_response(trace_id: &uuid::Uuid, model: &str, level: &DebugLevel, body
             debug_level = "v",
             body_len = 0usize,
             parse_result = "empty body",
-            "{} ack DEBUG[v] response | model: {} | trace_id: {}\n\
-             stop_reason: empty\n\
-             content_blocks: 0\n\
-             usage: not available",
-            trace_id, model, trace_id,
+            "{ANSI_YELLOW}{trace_id} ack{ANSI_RESET} DEBUG[v] response\n\
+             {UUID_INDENT}stop_reason: empty\n\
+             {UUID_INDENT}content_blocks: 0\n\
+             {UUID_INDENT}usage: not available",
+            trace_id = trace_id,
         );
         return;
     }
@@ -182,11 +194,13 @@ pub fn log_response(trace_id: &uuid::Uuid, model: &str, level: &DebugLevel, body
         trace_id = %trace_id,
         model = model,
         body_len = body_len,
-        "response raw body | trace_id: {} | len: {}\n  preview: {}\n  tail: {}",
-        trace_id,
-        body_len,
-        preview,
-        tail,
+        "{ANSI_YELLOW}{trace_id} ack{ANSI_RESET} response raw body | len: {body_len}\n\
+         {UUID_INDENT}preview: {preview}\n\
+         {UUID_INDENT}tail: {tail}",
+        trace_id = trace_id,
+        body_len = body_len,
+        preview = preview,
+        tail = tail,
     );
 
     let val: serde_json::Value = match serde_json::from_str(body) {
@@ -404,11 +418,12 @@ fn log_response_parsed(
     // Build v-mode summary with colon-aligned indentation
     let mut lines = vec![
         format!(
-            "{} ack DEBUG[{}] response | model: {} | trace_id: {}",
-            trace_id, level_tag, model, trace_id
+            "{ANSI_YELLOW}{trace_id} ack{ANSI_RESET} DEBUG[{level_tag}] response",
+            trace_id = trace_id,
+            level_tag = level_tag,
         ),
-        format!("stop_reason: {}", stop_reason),
-        format!("content_blocks: {}", block_count),
+        format!("{UUID_INDENT}stop_reason: {stop_reason}"),
+        format!("{UUID_INDENT}content_blocks: {block_count}"),
     ];
 
     // Sub-counts for content blocks — align after "content_blocks:"
@@ -426,7 +441,7 @@ fn log_response_parsed(
         }
     }
 
-    lines.push(format!("usage: {}", usage_str));
+    lines.push(format!("{UUID_INDENT}usage: {usage_str}"));
 
     let mut msg = lines.join("\n");
 
@@ -451,13 +466,13 @@ fn log_response_parsed(
 
 fn format_request_body_vv(
     trace_id: &uuid::Uuid,
-    model: &str,
+    _model: &str,
     val: &serde_json::Value,
     tool_names: &[&str],
 ) -> String {
     let mut lines = vec![format!(
-        "DEBUG[vv] request body | model: {} | trace_id: {}",
-        model, trace_id
+        "{ANSI_YELLOW}{trace_id} req{ANSI_RESET} DEBUG[vv] request body",
+        trace_id = trace_id,
     )];
 
     // Messages
@@ -481,14 +496,14 @@ fn format_request_body_vv(
                                 .map(|b| block_content_len(b.get("content")))
                                 .sum();
                             lines.push(format!(
-                                "  messages[{}] user (tool_result: {} blocks): {} chars",
+                                "{UUID_INDENT}messages[{}] user (tool_result: {} blocks): {} chars",
                                 i, tool_result_count, total_len
                             ));
                             continue;
                         }
                     }
                     let preview = content_preview(content);
-                    lines.push(format!("  messages[{}] user: {}", i, preview));
+                    lines.push(format!("{UUID_INDENT}messages[{}] user: {}", i, preview));
                 }
                 "assistant" => {
                     // Check for tool_use blocks
@@ -502,13 +517,13 @@ fn format_request_body_vv(
                             let text_preview = extract_text_from_blocks(arr);
                             if text_preview.is_empty() {
                                 lines.push(format!(
-                                    "  messages[{}] assistant (tool_use: [{}])",
+                                    "{UUID_INDENT}messages[{}] assistant (tool_use: [{}])",
                                     i,
                                     tool_uses.join(", ")
                                 ));
                             } else {
                                 lines.push(format!(
-                                    "  messages[{}] assistant: {} (tool_use: [{}])",
+                                    "{UUID_INDENT}messages[{}] assistant: {} (tool_use: [{}])",
                                     i,
                                     truncate_str(&text_preview, TEXT_PREVIEW_LEN),
                                     tool_uses.join(", ")
@@ -518,11 +533,11 @@ fn format_request_body_vv(
                         }
                     }
                     let preview = content_preview(content);
-                    lines.push(format!("  messages[{}] assistant: {}", i, preview));
+                    lines.push(format!("{UUID_INDENT}messages[{}] assistant: {}", i, preview));
                 }
                 _ => {
                     let preview = content_preview(content);
-                    lines.push(format!("  messages[{}] {}: {}", i, role, preview));
+                    lines.push(format!("{UUID_INDENT}messages[{}] {}: {}", i, role, preview));
                 }
             }
         }
@@ -540,21 +555,21 @@ fn format_request_body_vv(
             _ => String::new(),
         };
         if !sys_text.is_empty() {
-            lines.push(format!("  system: {:?}", truncate_str(&sys_text, TEXT_PREVIEW_LEN)));
+            lines.push(format!("{UUID_INDENT}system: {:?}", truncate_str(&sys_text, TEXT_PREVIEW_LEN)));
         }
     }
 
     // Tools
     if !tool_names.is_empty() {
         lines.push(format!(
-            "  tools: [{}]",
+            "{UUID_INDENT}tools: [{}]",
             format_tool_names(tool_names)
         ));
     }
 
     // max_tokens
     if let Some(mt) = val.get("max_tokens").and_then(|t| t.as_u64()) {
-        lines.push(format!("  max_tokens: {}", mt));
+        lines.push(format!("{UUID_INDENT}max_tokens: {}", mt));
     }
 
     lines.join("\n")
@@ -562,18 +577,18 @@ fn format_request_body_vv(
 
 fn format_response_body_vv(
     trace_id: &uuid::Uuid,
-    model: &str,
+    _model: &str,
     val: &serde_json::Value,
     stop_reason: &str,
     content_blocks: Option<&Vec<serde_json::Value>>,
     usage_str: &str,
 ) -> String {
     let mut lines = vec![format!(
-        "DEBUG[vv] response body | model: {} | trace_id: {}",
-        model, trace_id
+        "{ANSI_YELLOW}{trace_id} ack{ANSI_RESET} DEBUG[vv] response body",
+        trace_id = trace_id,
     )];
 
-    lines.push(format!("  stop_reason: {}", stop_reason));
+    lines.push(format!("{UUID_INDENT}stop_reason: {stop_reason}"));
 
     if let Some(blocks) = content_blocks {
         for (i, block) in blocks.iter().enumerate() {
@@ -585,7 +600,7 @@ fn format_response_body_vv(
                         .and_then(|t| t.as_str())
                         .unwrap_or("");
                     lines.push(format!(
-                        "  content[{}] text: {:?} ({} chars)",
+                        "{UUID_INDENT}content[{}] text: {:?} ({} chars)",
                         i,
                         truncate_str(text, TEXT_PREVIEW_LEN),
                         text.len()
@@ -601,18 +616,18 @@ fn format_response_body_vv(
                         .map(|inp| format_compact_json(inp))
                         .unwrap_or_default();
                     lines.push(format!(
-                        "  content[{}] tool_use: {} {}",
+                        "{UUID_INDENT}content[{}] tool_use: {} {}",
                         i, name, input
                     ));
                 }
                 _ => {
-                    lines.push(format!("  content[{}] {}: ...", i, block_type));
+                    lines.push(format!("{UUID_INDENT}content[{}] {}: ...", i, block_type));
                 }
             }
         }
     }
 
-    lines.push(format!("  usage: {}", usage_str));
+    lines.push(format!("{UUID_INDENT}usage: {usage_str}"));
 
     // Omit the unused `val` warning — val is kept for potential future field extraction
     let _ = val;
@@ -754,22 +769,22 @@ mod tests {
     #[test]
     fn test_indent_after_basic() {
         let result = indent_after("messages:", "user:", &2);
-        // "messages:" = 9 chars, +1 = 10 spaces
-        assert_eq!(result, "          user: 2");
+        // UUID_INDENT(9) + "messages:"(9) + 1 = 19 spaces, then "user: 2"
+        assert_eq!(result, "                    user: 2");
     }
 
     #[test]
     fn test_indent_after_tools() {
         let result = indent_after("tools:", "max_tokens:", &32000);
-        // "tools:" = 6 chars, +1 = 7 spaces
-        assert_eq!(result, "       max_tokens: 32000");
+        // UUID_INDENT(9) + "tools:"(6) + 1 = 16 spaces, then "max_tokens: 32000"
+        assert_eq!(result, "                 max_tokens: 32000");
     }
 
     #[test]
     fn test_indent_after_short_label() {
         let result = indent_after("x:", "y:", &"hello");
-        // "x:" = 2 chars, +1 = 3 spaces
-        assert_eq!(result, "   y: hello");
+        // UUID_INDENT(9) + "x:"(2) + 1 = 12 spaces, then "y: hello"
+        assert_eq!(result, "             y: hello");
     }
 
     // --- Existing tests ---
