@@ -24,6 +24,7 @@ pub async fn run_probe_loop(
     http_client: Arc<HttpClient>,
     notify: Arc<Notify>,
     fallback_config: FallbackConfig,
+    error_codes: Option<crate::error_map::ErrorCodesFile>,
     mut shutdown_rx: broadcast::Receiver<()>,
 ) {
     loop {
@@ -46,7 +47,7 @@ pub async fn run_probe_loop(
         let candidates = registry.probe_candidates(now);
 
         for provider in candidates {
-            let classifier = ErrorClassifier::from_config(&fallback_config, provider.provider_type);
+            let classifier = ErrorClassifier::new(provider.provider_type, error_codes.as_ref());
             probe_provider(&provider, &http_client, &classifier, &fallback_config).await;
         }
     }
@@ -136,7 +137,6 @@ async fn probe_provider(
         }
         Classification::Retryable { error_type, description } => {
             let desc = description
-                .map(|s| s.to_string())
                 .or(error_type)
                 .unwrap_or_else(|| format!("HTTP {}", status));
             tracing::warn!(
@@ -149,7 +149,6 @@ async fn probe_provider(
         }
         Classification::NonRetryable { error_type, description } => {
             let desc = description
-                .map(|s| s.to_string())
                 .or(error_type)
                 .unwrap_or_else(|| format!("HTTP {}", status));
             tracing::error!(
@@ -316,7 +315,7 @@ mod tests {
         // Send shutdown immediately
         tx.send(()).unwrap();
 
-        run_probe_loop(registry, client, notify, config, rx).await;
+        run_probe_loop(registry, client, notify, config, None, rx).await;
         // If we get here, the loop exited on shutdown
     }
 }

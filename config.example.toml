@@ -3,7 +3,7 @@
 
 [server]
 bind = "127.0.0.1"
-port = 3827
+port = 3837
 # api_key = "sk-zrouter-your-key-here"  # Set or use ZROUTER_API_KEY env
 max_body_size = 10485760  # 10MB
 
@@ -26,20 +26,23 @@ format = "text"  # "json" or "text"
 
 [providers.anthropic]
 endpoint = "https://api.anthropic.com"
-api_key_env = "ANTHROPIC_API_KEY"
+# api_key_env = "ANTHROPIC_API_KEY"   # Use env var in production
+api_key = "sk-ant-dev-placeholder"    # Replace with real key or use api_key_env
 connect_timeout_secs = 10
 read_timeout_secs = 300
 # provider_type = "anthropic"
 
 [providers.openrouter]
 endpoint = "https://openrouter.ai/api"
-api_key_env = "OPENROUTER_API_KEY"
+# api_key_env = "OPENROUTER_API_KEY"
+api_key = "sk-or-dev-placeholder"
 connect_timeout_secs = 10
 read_timeout_secs = 300
 
 [providers.closeai]
 endpoint = "https://api.openai-proxy.org/anthropic"
-api_key_env = "CLOSEAI_API_KEY"
+# api_key_env = "CLOSEAI_API_KEY"
+api_key = "sk-closeai-dev-placeholder"
 connect_timeout_secs = 10
 read_timeout_secs = 300
 
@@ -76,15 +79,16 @@ steps = [
   { provider = "closeai" },
 ]
 
+# --- Error codes configuration ---
+# Path to error code rules file. Without this, all non-2xx responses are Fatal.
+# Uncomment the line below to enable provider-aware error classification.
+# Path is relative to this config file's directory.
+# error_codes_file = "error-codes.toml"
+
 # --- Fallback policy ---
 
 [fallback]
 step_max_retries = 2           # max retries per step (2 = 3 attempts total)
 initial_delay_ms = 500         # initial retry delay
 max_delay_ms = 8000            # max retry delay cap
-# Global error classification overrides (empty = use provider_type defaults)
-# retryable_codes = [429, 500, 502, 503, 504, 529]
-# retryable_error_types = []
-# non_retryable_codes = [400, 401, 403, 404]
-# non_retryable_error_types = []
 non_retryable_cooldown_secs = 3600  # cooldown for non-retryable failures

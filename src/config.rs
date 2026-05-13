@@ -9,6 +9,8 @@ pub struct Config {
     pub providers: HashMap<String, ProviderConfig>,
     pub route: Vec<RouteConfig>,
     pub fallback: FallbackConfig,
+    #[serde(default)]
+    pub error_codes_file: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -100,14 +102,6 @@ pub struct FallbackConfig {
     pub initial_delay_ms: u64,
     #[serde(default = "default_max_delay")]
     pub max_delay_ms: u64,
-    #[serde(default)]
-    pub retryable_codes: Vec<u16>,
-    #[serde(default)]
-    pub retryable_error_types: Vec<String>,
-    #[serde(default)]
-    pub non_retryable_codes: Vec<u16>,
-    #[serde(default)]
-    pub non_retryable_error_types: Vec<String>,
     #[serde(default = "default_non_retryable_cooldown")]
     pub non_retryable_cooldown_secs: u64,
 }
@@ -134,10 +128,6 @@ impl Default for FallbackConfig {
             step_max_retries: default_step_max_retries(),
             initial_delay_ms: default_initial_delay(),
             max_delay_ms: default_max_delay(),
-            retryable_codes: Vec::new(),
-            retryable_error_types: Vec::new(),
-            non_retryable_codes: Vec::new(),
-            non_retryable_error_types: Vec::new(),
             non_retryable_cooldown_secs: default_non_retryable_cooldown(),
         }
     }

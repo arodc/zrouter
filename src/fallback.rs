@@ -263,10 +263,6 @@ mod tests {
             step_max_retries: 2,
             initial_delay_ms: 10,
             max_delay_ms: 100,
-            retryable_codes: Vec::new(),
-            retryable_error_types: Vec::new(),
-            non_retryable_codes: Vec::new(),
-            non_retryable_error_types: Vec::new(),
             non_retryable_cooldown_secs: 3600,
         }
     }

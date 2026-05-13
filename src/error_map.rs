@@ -1,6 +1,6 @@
-use std::collections::HashSet;
-
-use crate::config::FallbackConfig;
+// ---------------------------------------------------------------------------
+// Provider type
+// ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -28,157 +28,187 @@ impl ProviderType {
             _ => Self::Anthropic,
         }
     }
+
+    #[allow(dead_code)]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Anthropic => "anthropic",
+            Self::Deepseek => "deepseek",
+            Self::Zhipu => "zhipu",
+            Self::Kimi => "kimi",
+            Self::OpenAi => "openai",
+        }
+    }
 }
+
+// ---------------------------------------------------------------------------
+// TOML deserialization types (public)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct CodeRuleDef {
+    pub code: u16,
+    #[serde(default, rename = "error_type")]
+    pub error_type_filter: Option<String>,
+    pub description: String,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct ProviderPresetDef {
+    #[serde(default)]
+    pub retryable: Vec<CodeRuleDef>,
+    #[serde(default)]
+    pub non_retryable: Vec<CodeRuleDef>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ErrorCodesFile {
+    pub default: Option<ProviderPresetDef>,
+    pub anthropic: Option<ProviderPresetDef>,
+    pub deepseek: Option<ProviderPresetDef>,
+    pub zhipu: Option<ProviderPresetDef>,
+    pub kimi: Option<ProviderPresetDef>,
+    pub openai: Option<ProviderPresetDef>,
+}
+
+impl ErrorCodesFile {
+    pub fn load(
+        path: Option<&str>,
+        config_dir: &std::path::Path,
+    ) -> Option<Self> {
+        let Some(path) = path else {
+            return None;
+        };
+        let full_path = if std::path::Path::new(path).is_absolute() {
+            std::path::PathBuf::from(path)
+        } else {
+            config_dir.join(path)
+        };
+        if !full_path.exists() {
+            tracing::warn!("error_codes_file '{}' not found, error descriptions will be unavailable", full_path.display());
+            return None;
+        }
+        let content = match std::fs::read_to_string(&full_path) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!("failed to read error_codes_file '{}': {}, error descriptions will be unavailable", full_path.display(), e);
+                return None;
+            }
+        };
+        match toml::from_str::<ErrorCodesFile>(&content) {
+            Ok(codes) => Some(codes),
+            Err(e) => {
+                tracing::warn!("failed to parse error_codes_file '{}': {}, error descriptions will be unavailable", full_path.display(), e);
+                None
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Classification result
+// ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Classification {
     Success,
     Retryable {
         error_type: Option<String>,
-        description: Option<&'static str>,
+        description: Option<String>,
     },
     NonRetryable {
         error_type: Option<String>,
-        description: Option<&'static str>,
+        description: Option<String>,
     },
     Fatal,
 }
 
+// ---------------------------------------------------------------------------
+// Internal types (owned)
+// ---------------------------------------------------------------------------
+
 struct CodeRule {
     code: u16,
-    error_type_filter: Option<&'static str>,
-    description: &'static str,
+    error_type_filter: Option<String>,
+    description: String,
 }
 
 struct ProviderPreset {
-    retryable: &'static [CodeRule],
-    non_retryable: &'static [CodeRule],
+    retryable: Vec<CodeRule>,
+    non_retryable: Vec<CodeRule>,
 }
 
-// Static presets — each is a named static so we can take a &'static reference.
+// ---------------------------------------------------------------------------
+// Resolve preset from ErrorCodesFile (empty when no config)
+// ---------------------------------------------------------------------------
 
-static ANTHROPIC_PRESET: ProviderPreset = ProviderPreset {
-    retryable: &[
-        CodeRule { code: 429, error_type_filter: Some("rate_limit_error"), description: "Rate limited (HTTP 429): Anthropic rate limit exceeded" },
-        CodeRule { code: 500, error_type_filter: Some("api_error"), description: "API error (HTTP 500): Anthropic server error" },
-        CodeRule { code: 529, error_type_filter: Some("overloaded_error"), description: "Overloaded (HTTP 529): Anthropic service overloaded" },
-    ],
-    non_retryable: &[
-        CodeRule { code: 400, error_type_filter: Some("invalid_request_error"), description: "Invalid request (HTTP 400): Bad request to Anthropic" },
-        CodeRule { code: 401, error_type_filter: Some("authentication_error"), description: "Auth error (HTTP 401): Invalid Anthropic API key" },
-        CodeRule { code: 403, error_type_filter: Some("permission_error"), description: "Permission denied (HTTP 403): Insufficient Anthropic permissions" },
-        CodeRule { code: 404, error_type_filter: Some("not_found_error"), description: "Not found (HTTP 404): Anthropic resource not found" },
-    ],
-};
-
-static DEEPSEEK_PRESET: ProviderPreset = ProviderPreset {
-    retryable: &[
-        CodeRule { code: 429, error_type_filter: None, description: "Rate limited (HTTP 429): DeepSeek rate limit" },
-        CodeRule { code: 500, error_type_filter: None, description: "Server error (HTTP 500): DeepSeek internal error" },
-        CodeRule { code: 503, error_type_filter: None, description: "Unavailable (HTTP 503): DeepSeek service unavailable" },
-    ],
-    non_retryable: &[
-        CodeRule { code: 400, error_type_filter: None, description: "Bad request (HTTP 400): Invalid DeepSeek request" },
-        CodeRule { code: 401, error_type_filter: None, description: "Auth error (HTTP 401): Invalid DeepSeek API key" },
-        CodeRule { code: 402, error_type_filter: None, description: "Payment required (HTTP 402): DeepSeek billing issue" },
-        CodeRule { code: 422, error_type_filter: None, description: "Unprocessable (HTTP 422): DeepSeek request validation failed" },
-    ],
-};
-
-static ZHIPU_PRESET: ProviderPreset = ProviderPreset {
-    retryable: &[
-        CodeRule { code: 429, error_type_filter: None, description: "Rate limited (HTTP 429): Zhipu rate limit" },
-        CodeRule { code: 500, error_type_filter: None, description: "Server error (HTTP 500): Zhipu internal error" },
-        CodeRule { code: 503, error_type_filter: None, description: "Unavailable (HTTP 503): Zhipu service unavailable" },
-    ],
-    non_retryable: &[
-        CodeRule { code: 400, error_type_filter: None, description: "Bad request (HTTP 400): Invalid Zhipu request" },
-        CodeRule { code: 401, error_type_filter: None, description: "Auth error (HTTP 401): Invalid Zhipu API key" },
-        CodeRule { code: 402, error_type_filter: None, description: "Payment required (HTTP 402): Zhipu billing issue" },
-        CodeRule { code: 403, error_type_filter: None, description: "Forbidden (HTTP 403): Zhipu access denied" },
-        CodeRule { code: 404, error_type_filter: None, description: "Not found (HTTP 404): Zhipu resource not found" },
-    ],
-};
-
-static KIMI_PRESET: ProviderPreset = ProviderPreset {
-    retryable: &[
-        CodeRule { code: 429, error_type_filter: Some("rate_limit_reached_error"), description: "Rate limited (HTTP 429): Kimi rate limit reached" },
-        CodeRule { code: 500, error_type_filter: Some("server_error"), description: "Server error (HTTP 500): Kimi internal error" },
-        CodeRule { code: 503, error_type_filter: Some("engine_overloaded_error"), description: "Overloaded (HTTP 503): Kimi engine overloaded" },
-    ],
-    non_retryable: &[
-        CodeRule { code: 400, error_type_filter: None, description: "Bad request (HTTP 400): Invalid Kimi request" },
-        CodeRule { code: 401, error_type_filter: None, description: "Auth error (HTTP 401): Invalid Kimi API key" },
-        CodeRule { code: 403, error_type_filter: Some("exceeded_current_quota_error"), description: "Quota exceeded (HTTP 403): Kimi quota exceeded" },
-        CodeRule { code: 403, error_type_filter: Some("permission_denied_error"), description: "Permission denied (HTTP 403): Kimi access denied" },
-        CodeRule { code: 404, error_type_filter: None, description: "Not found (HTTP 404): Kimi resource not found" },
-    ],
-};
-
-static OPENAI_PRESET: ProviderPreset = ProviderPreset {
-    retryable: &[
-        CodeRule { code: 429, error_type_filter: Some("rate_limit_error"), description: "Rate limited (HTTP 429): OpenAI rate limit" },
-        CodeRule { code: 500, error_type_filter: Some("server_error"), description: "Server error (HTTP 500): OpenAI internal error" },
-        CodeRule { code: 503, error_type_filter: Some("service_unavailable"), description: "Unavailable (HTTP 503): OpenAI service unavailable" },
-    ],
-    non_retryable: &[
-        CodeRule { code: 400, error_type_filter: Some("invalid_request_error"), description: "Bad request (HTTP 400): Invalid OpenAI request" },
-        CodeRule { code: 401, error_type_filter: None, description: "Auth error (HTTP 401): Invalid OpenAI API key" },
-        CodeRule { code: 403, error_type_filter: Some("permission_error"), description: "Permission denied (HTTP 403): OpenAI access denied" },
-        CodeRule { code: 404, error_type_filter: None, description: "Not found (HTTP 404): OpenAI resource not found" },
-    ],
-};
-
-fn get_preset(provider_type: ProviderType) -> &'static ProviderPreset {
-    match provider_type {
-        ProviderType::Anthropic => &ANTHROPIC_PRESET,
-        ProviderType::Deepseek => &DEEPSEEK_PRESET,
-        ProviderType::Zhipu => &ZHIPU_PRESET,
-        ProviderType::Kimi => &KIMI_PRESET,
-        ProviderType::OpenAi => &OPENAI_PRESET,
+fn resolve_preset(
+    provider_type: ProviderType,
+    error_codes: Option<&ErrorCodesFile>,
+) -> ProviderPreset {
+    let Some(codes) = error_codes else {
+        return ProviderPreset { retryable: vec![], non_retryable: vec![] };
+    };
+    let def = match provider_type {
+        ProviderType::Anthropic => codes.anthropic.as_ref(),
+        ProviderType::Deepseek => codes.deepseek.as_ref(),
+        ProviderType::Zhipu => codes.zhipu.as_ref(),
+        ProviderType::Kimi => codes.kimi.as_ref(),
+        ProviderType::OpenAi => codes.openai.as_ref(),
+    };
+    match def {
+        Some(d) => preset_def_to_owned(d),
+        None => codes
+            .default
+            .as_ref()
+            .map(preset_def_to_owned)
+            .unwrap_or(ProviderPreset {
+                retryable: vec![],
+                non_retryable: vec![],
+            }),
     }
 }
 
+fn preset_def_to_owned(def: &ProviderPresetDef) -> ProviderPreset {
+    ProviderPreset {
+        retryable: def
+            .retryable
+            .iter()
+            .map(|r| CodeRule {
+                code: r.code,
+                error_type_filter: r.error_type_filter.clone(),
+                description: r.description.clone(),
+            })
+            .collect(),
+        non_retryable: def
+            .non_retryable
+            .iter()
+            .map(|r| CodeRule {
+                code: r.code,
+                error_type_filter: r.error_type_filter.clone(),
+                description: r.description.clone(),
+            })
+            .collect(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ErrorClassifier
+// ---------------------------------------------------------------------------
+
 pub struct ErrorClassifier {
-    retryable_codes: HashSet<u16>,
-    non_retryable_codes: HashSet<u16>,
-    retryable_error_types: HashSet<String>,
-    non_retryable_error_types: HashSet<String>,
-    preset: &'static ProviderPreset,
-    has_global_overrides: bool,
+    preset: ProviderPreset,
 }
 
 impl ErrorClassifier {
     pub fn new(
-        global_retryable_codes: &[u16],
-        global_retryable_error_types: &[String],
-        global_non_retryable_codes: &[u16],
-        global_non_retryable_error_types: &[String],
         provider_type: ProviderType,
+        error_codes: Option<&ErrorCodesFile>,
     ) -> Self {
-        let has_global_overrides = !global_retryable_codes.is_empty()
-            || !global_retryable_error_types.is_empty()
-            || !global_non_retryable_codes.is_empty()
-            || !global_non_retryable_error_types.is_empty();
-
         Self {
-            retryable_codes: global_retryable_codes.iter().copied().collect(),
-            non_retryable_codes: global_non_retryable_codes.iter().copied().collect(),
-            retryable_error_types: global_retryable_error_types.iter().cloned().collect(),
-            non_retryable_error_types: global_non_retryable_error_types.iter().cloned().collect(),
-            preset: get_preset(provider_type),
-            has_global_overrides,
+            preset: resolve_preset(provider_type, error_codes),
         }
-    }
-
-    pub fn from_config(config: &FallbackConfig, provider_type: ProviderType) -> Self {
-        Self::new(
-            &config.retryable_codes,
-            &config.retryable_error_types,
-            &config.non_retryable_codes,
-            &config.non_retryable_error_types,
-            provider_type,
-        )
     }
 
     pub fn classify(&self, status: u16, body: &str) -> Classification {
@@ -187,86 +217,31 @@ impl ErrorClassifier {
             return Classification::Success;
         }
 
-        // 2. Check global overrides first (when non-empty)
-        if self.has_global_overrides {
-            if self.retryable_codes.contains(&status) {
-                return Classification::Retryable {
-                    error_type: None,
-                    description: None,
-                };
-            }
-            if self.non_retryable_codes.contains(&status) {
-                return Classification::NonRetryable {
-                    error_type: None,
-                    description: None,
-                };
-            }
-        }
-
-        // 3. Check preset code rules (with optional error_type_filter)
-        if let Some(rule) = find_matching_rule(self.preset.retryable, status, body) {
+        // 2. Check preset code rules (with optional error_type_filter)
+        if let Some(rule) = find_matching_rule(&self.preset.retryable, status, body) {
             return Classification::Retryable {
                 error_type: extract_error_type(body),
-                description: Some(rule.description),
+                description: Some(rule.description.clone()),
             };
         }
-        if let Some(rule) = find_matching_rule(self.preset.non_retryable, status, body) {
+        if let Some(rule) = find_matching_rule(&self.preset.non_retryable, status, body) {
             return Classification::NonRetryable {
                 error_type: extract_error_type(body),
-                description: Some(rule.description),
+                description: Some(rule.description.clone()),
             };
         }
 
-        // 4. Check global error_type overrides
-        let body_error_type = extract_error_type(body);
-        if let Some(ref et) = body_error_type {
-            if self.retryable_error_types.contains(et) {
-                return Classification::Retryable {
-                    error_type: body_error_type,
-                    description: None,
-                };
-            }
-            if self.non_retryable_error_types.contains(et) {
-                return Classification::NonRetryable {
-                    error_type: body_error_type,
-                    description: None,
-                };
-            }
-        }
-
-        // 5. Non-JSON body fallback: 5xx/429 -> Retryable, other >=400 -> Fatal
-        if body_error_type.is_none() {
-            if status >= 500 || status == 429 {
-                return Classification::Retryable {
-                    error_type: None,
-                    description: None,
-                };
-            }
-            if status >= 400 {
-                return Classification::Fatal;
-            }
-        }
-
-        // 6. Default: unparseable or unexpected status
-        if status >= 500 {
-            Classification::Retryable {
-                error_type: body_error_type,
-                description: None,
-            }
-        } else if status >= 400 {
-            Classification::Fatal
-        } else {
-            Classification::Success
-        }
+        // 3. No matching rule -> Fatal
+        Classification::Fatal
     }
 }
 
-fn find_matching_rule(rules: &'static [CodeRule], status: u16, body: &str) -> Option<&'static CodeRule> {
+fn find_matching_rule<'a>(rules: &'a [CodeRule], status: u16, body: &str) -> Option<&'a CodeRule> {
     for rule in rules {
         if rule.code != status {
             continue;
         }
-        match rule.error_type_filter {
+        match &rule.error_type_filter {
             None => return Some(rule),
             Some(filter) => {
                 let body_type = extract_error_type(body);
@@ -289,12 +264,21 @@ fn extract_error_type(body: &str) -> Option<String> {
         .map(|s| s.to_string())
 }
 
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn classifier_for(provider_type: ProviderType) -> ErrorClassifier {
-        ErrorClassifier::new(&[], &[], &[], &[], provider_type)
+        ErrorClassifier::new(provider_type, None)
+    }
+
+    fn classifier_with_codes(toml_str: &str, provider_type: ProviderType) -> ErrorClassifier {
+        let codes: ErrorCodesFile = toml::from_str(toml_str).unwrap();
+        ErrorClassifier::new(provider_type, Some(&codes))
     }
 
     #[test]
@@ -306,29 +290,131 @@ mod tests {
     }
 
     #[test]
-    fn test_anthropic_retryable_429() {
+    fn test_no_config_no_rules() {
         let c = classifier_for(ProviderType::Anthropic);
+        let body = r#"{"type":"error","error":{"type":"rate_limit_error","message":"too many"}}"#;
+        // No config at all → no rules → Fatal
+        assert!(matches!(c.classify(429, body), Classification::Fatal));
+    }
+
+    #[test]
+    fn test_no_config_5xx_fatal() {
+        let c = classifier_for(ProviderType::Anthropic);
+        // No config → no rules → Fatal
+        assert!(matches!(
+            c.classify(502, "<html>Bad Gateway</html>"),
+            Classification::Fatal
+        ));
+        assert!(matches!(
+            c.classify(500, "Internal Server Error"),
+            Classification::Fatal
+        ));
+    }
+
+    #[test]
+    fn test_no_config_4xx_fatal() {
+        let c = classifier_for(ProviderType::Anthropic);
+        assert!(matches!(
+            c.classify(405, "Method Not Allowed"),
+            Classification::Fatal
+        ));
+    }
+
+    // --- Tests with TOML error codes config ---
+
+    #[test]
+    fn test_anthropic_retryable_429_with_config() {
+        let toml = r#"
+[anthropic]
+retryable = [
+  { code = 429, error_type = "rate_limit_error", description = "Rate limit (HTTP 429): request exceeded rate limit — reduce frequency" },
+]
+non_retryable = []
+"#;
+        let c = classifier_with_codes(toml, ProviderType::Anthropic);
         let body = r#"{"type":"error","error":{"type":"rate_limit_error","message":"too many"}}"#;
         match c.classify(429, body) {
             Classification::Retryable { description, .. } => {
                 assert!(description.is_some());
+                assert!(description.unwrap().contains("Rate limit"));
             }
             other => panic!("expected Retryable, got {:?}", other),
         }
     }
 
     #[test]
-    fn test_anthropic_retryable_529() {
-        let c = classifier_for(ProviderType::Anthropic);
-        let body = r#"{"type":"error","error":{"type":"overloaded_error","message":"overloaded"}}"#;
-        assert!(matches!(c.classify(529, body), Classification::Retryable { .. }));
+    fn test_anthropic_non_retryable_400_with_config() {
+        let toml = r#"
+[anthropic]
+retryable = []
+non_retryable = [
+  { code = 400, error_type = "invalid_request_error", description = "Invalid request (HTTP 400): bad format" },
+]
+"#;
+        let c = classifier_with_codes(toml, ProviderType::Anthropic);
+        let body = r#"{"type":"error","error":{"type":"invalid_request_error","message":"bad"}}"#;
+        match c.classify(400, body) {
+            Classification::NonRetryable { description, .. } => {
+                assert!(description.is_some());
+                assert!(description.unwrap().contains("Invalid request"));
+            }
+            other => panic!("expected NonRetryable, got {:?}", other),
+        }
     }
 
     #[test]
-    fn test_anthropic_non_retryable_400() {
-        let c = classifier_for(ProviderType::Anthropic);
-        let body = r#"{"type":"error","error":{"type":"invalid_request_error","message":"bad"}}"#;
-        match c.classify(400, body) {
+    fn test_kimi_engine_overloaded_429_with_config() {
+        let toml = r#"
+[kimi]
+retryable = [
+  { code = 429, error_type = "engine_overloaded_error", description = "Overloaded (HTTP 429): engine overloaded — try again later" },
+]
+non_retryable = []
+"#;
+        let c = classifier_with_codes(toml, ProviderType::Kimi);
+        let body = r#"{"error":{"type":"engine_overloaded_error","message":"overloaded"}}"#;
+        match c.classify(429, body) {
+            Classification::Retryable { description, .. } => {
+                assert!(description.is_some());
+                assert!(description.unwrap().contains("Overloaded"));
+            }
+            other => panic!(
+                "expected Retryable for 429 engine_overloaded_error, got {:?}",
+                other
+            ),
+        }
+    }
+
+    #[test]
+    fn test_zhipu_file_too_large_435_with_config() {
+        let toml = r#"
+[zhipu]
+retryable = []
+non_retryable = [
+  { code = 435, description = "File too large (HTTP 435): file exceeds 100 MB limit" },
+]
+"#;
+        let c = classifier_with_codes(toml, ProviderType::Zhipu);
+        match c.classify(435, r#"{"error":{"code":"435","message":"too big"}}"#) {
+            Classification::NonRetryable { description, .. } => {
+                assert!(description.is_some());
+                assert!(description.unwrap().contains("100 MB"));
+            }
+            other => panic!("expected NonRetryable for 435, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_deepseek_422_non_retryable_with_config() {
+        let toml = r#"
+[deepseek]
+retryable = []
+non_retryable = [
+  { code = 422, description = "Unprocessable (HTTP 422): invalid parameters" },
+]
+"#;
+        let c = classifier_with_codes(toml, ProviderType::Deepseek);
+        match c.classify(422, r#"{"error":{"message":"bad param"}}"#) {
             Classification::NonRetryable { description, .. } => {
                 assert!(description.is_some());
             }
@@ -336,54 +422,232 @@ mod tests {
         }
     }
 
+    // --- TOML parsing and config tests ---
+
     #[test]
-    fn test_anthropic_non_retryable_401() {
-        let c = classifier_for(ProviderType::Anthropic);
-        let body = r#"{"type":"error","error":{"type":"authentication_error","message":"bad key"}}"#;
-        assert!(matches!(c.classify(401, body), Classification::NonRetryable { .. }));
+    fn test_error_codes_toml_parse() {
+        let toml = r#"
+[anthropic]
+retryable = [
+  { code = 429, error_type = "rate_limit_error", description = "Rate limit" },
+]
+non_retryable = [
+  { code = 401, error_type = "authentication_error", description = "Auth error" },
+]
+"#;
+        let parsed: ErrorCodesFile = toml::from_str(toml).unwrap();
+        assert!(parsed.anthropic.is_some());
+        assert!(parsed.deepseek.is_none());
+        let a = parsed.anthropic.unwrap();
+        assert_eq!(a.retryable.len(), 1);
+        assert_eq!(a.non_retryable.len(), 1);
     }
 
     #[test]
-    fn test_non_json_body_5xx_fallback_retryable() {
-        let c = classifier_for(ProviderType::Anthropic);
-        assert!(matches!(c.classify(502, "<html>Bad Gateway</html>"), Classification::Retryable { .. }));
-        assert!(matches!(c.classify(500, "Internal Server Error"), Classification::Retryable { .. }));
-    }
-
-    #[test]
-    fn test_non_json_body_4xx_fallback_fatal() {
-        let c = classifier_for(ProviderType::Anthropic);
-        assert!(matches!(c.classify(405, "Method Not Allowed"), Classification::Fatal));
-    }
-
-    #[test]
-    fn test_global_overrides_take_precedence() {
+    fn test_error_codes_override() {
+        let toml = r#"
+[anthropic]
+retryable = [
+  { code = 429, error_type = "rate_limit_error", description = "Custom rate limit desc" },
+]
+non_retryable = []
+"#;
+        let codes: ErrorCodesFile = toml::from_str(toml).unwrap();
         let c = ErrorClassifier::new(
-            &[418],
-            &[],
-            &[451],
-            &[],
             ProviderType::Anthropic,
+            Some(&codes),
         );
-        assert!(matches!(c.classify(418, "{}"), Classification::Retryable { .. }));
-        assert!(matches!(c.classify(451, "{}"), Classification::NonRetryable { .. }));
-        let body = r#"{"type":"error","error":{"type":"invalid_request_error","message":"bad"}}"#;
-        assert!(matches!(c.classify(400, body), Classification::NonRetryable { .. }));
+        let body = r#"{"type":"error","error":{"type":"rate_limit_error","message":"x"}}"#;
+        match c.classify(429, body) {
+            Classification::Retryable { description, .. } => {
+                assert_eq!(description, Some("Custom rate limit desc".to_string()));
+            }
+            other => panic!("expected Retryable, got {:?}", other),
+        }
     }
 
     #[test]
-    fn test_global_error_type_overrides() {
+    fn test_error_codes_partial_config() {
+        let toml = r#"
+[anthropic]
+retryable = [
+  { code = 429, error_type = "rate_limit_error", description = "Custom" },
+]
+non_retryable = []
+"#;
+        let codes: ErrorCodesFile = toml::from_str(toml).unwrap();
+        // DeepSeek not in file, no [default] → no rules → Fatal
         let c = ErrorClassifier::new(
-            &[],
-            &["custom_retryable".to_string()],
-            &[],
-            &["custom_fatal".to_string()],
-            ProviderType::Anthropic,
+            ProviderType::Deepseek,
+            Some(&codes),
         );
-        let body_retry = r#"{"type":"error","error":{"type":"custom_retryable","message":"x"}}"#;
-        assert!(matches!(c.classify(500, body_retry), Classification::Retryable { .. }));
+        assert!(matches!(c.classify(429, "{}"), Classification::Fatal));
+    }
 
-        let body_fatal = r#"{"type":"error","error":{"type":"custom_fatal","message":"x"}}"#;
-        assert!(matches!(c.classify(500, body_fatal), Classification::NonRetryable { .. }));
+    #[test]
+    fn test_no_config_5xx_with_json_body_fatal() {
+        let c = classifier_for(ProviderType::Anthropic);
+        let body = r#"{"type":"error","error":{"type":"timeout_error","message":"timed out"}}"#;
+        // No config → no rules → Fatal
+        assert!(matches!(c.classify(504, body), Classification::Fatal));
+    }
+
+    #[test]
+    fn test_no_config_4xx_with_json_body_fatal() {
+        let c = classifier_for(ProviderType::Anthropic);
+        let body = r#"{"type":"error","error":{"type":"billing_error","message":"payment"}}"#;
+        // No config → no rules → Fatal
+        assert!(matches!(c.classify(402, body), Classification::Fatal));
+    }
+
+    // --- [default] section tests ---
+
+    #[test]
+    fn test_default_section_used_as_fallback() {
+        let toml = r#"
+[default]
+retryable = [
+  { code = 429, description = "Rate limited" },
+  { code = 500, description = "Server error" },
+]
+non_retryable = [
+  { code = 400, description = "Bad request" },
+]
+"#;
+        let codes: ErrorCodesFile = toml::from_str(toml).unwrap();
+        // DeepSeek not listed → uses [default]
+        let c = ErrorClassifier::new(ProviderType::Deepseek, Some(&codes));
+        match c.classify(429, "{}") {
+            Classification::Retryable { description, .. } => {
+                assert_eq!(description, Some("Rate limited".to_string()));
+            }
+            other => panic!("expected Retryable, got {:?}", other),
+        }
+        match c.classify(500, "error") {
+            Classification::Retryable { description, .. } => {
+                assert_eq!(description, Some("Server error".to_string()));
+            }
+            other => panic!("expected Retryable, got {:?}", other),
+        }
+        match c.classify(400, "{}") {
+            Classification::NonRetryable { description, .. } => {
+                assert_eq!(description, Some("Bad request".to_string()));
+            }
+            other => panic!("expected NonRetryable, got {:?}", other),
+        }
+        // 404 not in [default] → Fatal
+        assert!(matches!(c.classify(404, "{}"), Classification::Fatal));
+    }
+
+    #[test]
+    fn test_default_section_absent() {
+        let toml = r#"
+[anthropic]
+retryable = [
+  { code = 429, error_type = "rate_limit_error", description = "Custom" },
+]
+non_retryable = []
+"#;
+        let codes: ErrorCodesFile = toml::from_str(toml).unwrap();
+        assert!(codes.default.is_none());
+        // DeepSeek not in file, no [default] → no rules → Fatal
+        let c = ErrorClassifier::new(ProviderType::Deepseek, Some(&codes));
+        assert!(matches!(c.classify(429, "{}"), Classification::Fatal));
+    }
+
+    #[test]
+    fn test_provider_specific_overrides_default() {
+        let toml = r#"
+[default]
+retryable = [
+  { code = 429, description = "Generic rate limit" },
+]
+non_retryable = []
+
+[anthropic]
+retryable = [
+  { code = 429, error_type = "rate_limit_error", description = "Anthropic rate limit" },
+]
+non_retryable = []
+"#;
+        let codes: ErrorCodesFile = toml::from_str(toml).unwrap();
+        // Anthropic has its own section → uses it, not [default]
+        let c = ErrorClassifier::new(ProviderType::Anthropic, Some(&codes));
+        let body = r#"{"type":"error","error":{"type":"rate_limit_error","message":"x"}}"#;
+        match c.classify(429, body) {
+            Classification::Retryable { description, .. } => {
+                assert_eq!(description, Some("Anthropic rate limit".to_string()));
+            }
+            other => panic!("expected Retryable with Anthropic desc, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_default_section_parsed() {
+        let toml = r#"
+[default]
+retryable = [{ code = 429, description = "Rate limited" }]
+non_retryable = [{ code = 401, description = "Unauthorized" }]
+"#;
+        let parsed: ErrorCodesFile = toml::from_str(toml).unwrap();
+        let d = parsed.default.unwrap();
+        assert_eq!(d.retryable.len(), 1);
+        assert_eq!(d.non_retryable.len(), 1);
+        assert_eq!(d.retryable[0].code, 429);
+        assert_eq!(d.non_retryable[0].code, 401);
+    }
+
+    #[test]
+    fn test_error_type_filter_mismatch_skips_rule() {
+        let toml = r#"
+[anthropic]
+retryable = [
+  { code = 429, error_type = "rate_limit_error", description = "Rate limit" },
+]
+non_retryable = []
+"#;
+        let codes: ErrorCodesFile = toml::from_str(toml).unwrap();
+        let c = ErrorClassifier::new(ProviderType::Anthropic, Some(&codes));
+        // Body has overloaded_error, rule filters on rate_limit_error → no match → Fatal
+        let body = r#"{"type":"error","error":{"type":"overloaded_error","message":"overloaded"}}"#;
+        assert!(matches!(c.classify(429, body), Classification::Fatal));
+    }
+
+    #[test]
+    fn test_error_type_filter_non_json_body_skips_rule() {
+        let toml = r#"
+[default]
+retryable = [
+  { code = 429, error_type = "rate_limit_error", description = "Rate limit" },
+]
+non_retryable = []
+"#;
+        let codes: ErrorCodesFile = toml::from_str(toml).unwrap();
+        let c = ErrorClassifier::new(ProviderType::Deepseek, Some(&codes));
+        // Non-JSON body can't verify error_type filter → rule skipped → Fatal
+        assert!(matches!(c.classify(429, "upstream timeout"), Classification::Fatal));
+    }
+
+    #[test]
+    fn test_error_codes_toml_unknown_key_rejected() {
+        let toml = r#"
+[anthopi]
+retryable = []
+non_retryable = []
+"#;
+        assert!(toml::from_str::<ErrorCodesFile>(toml).is_err());
+    }
+
+    #[test]
+    fn test_provider_type_as_str_roundtrip() {
+        for pt in [
+            ProviderType::Anthropic,
+            ProviderType::Deepseek,
+            ProviderType::Zhipu,
+            ProviderType::Kimi,
+            ProviderType::OpenAi,
+        ] {
+            assert_eq!(ProviderType::from_str_lossy(pt.as_str()), pt);
+        }
     }
 }

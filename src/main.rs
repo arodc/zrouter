@@ -33,6 +33,14 @@ async fn main() {
 
     logging::init(&config.logging);
 
+    let config_dir = std::path::Path::new(&args.config)
+        .parent()
+        .unwrap_or(std::path::Path::new("."));
+    let error_codes = crate::error_map::ErrorCodesFile::load(
+        config.error_codes_file.as_deref(),
+        config_dir,
+    );
+
     let version = env!("CARGO_PKG_VERSION");
     let git_commit = option_env!("GIT_COMMIT").unwrap_or("unknown");
     tracing::info!(version, git_commit, "zrouter starting");
@@ -55,6 +63,7 @@ async fn main() {
     let state = Arc::new(server::AppState {
         config,
         providers,
+        error_codes,
     });
 
     // 5. Setup shutdown signal (before spawning probe loop)
@@ -66,10 +75,11 @@ async fn main() {
         let client = http_client.clone();
         let notify = probe_notify.clone();
         let fallback_config = state.config.fallback.clone();
+        let error_codes = state.error_codes.clone();
         let shutdown_rx = shutdown_tx.subscribe();
 
         tokio::spawn(async move {
-            probe::run_probe_loop(providers, client, notify, fallback_config, shutdown_rx).await;
+            probe::run_probe_loop(providers, client, notify, fallback_config, error_codes, shutdown_rx).await;
         });
     }
 

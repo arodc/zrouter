@@ -26,6 +26,7 @@ const MAX_RESPONSE_BODY: usize = 20 * 1024 * 1024; // 20MB
 pub struct AppState {
     pub config: crate::config::Config,
     pub providers: Arc<Registry>,
+    pub error_codes: Option<crate::error_map::ErrorCodesFile>,
 }
 
 pub(crate) fn build_http_client() -> HttpClient {
@@ -237,17 +238,17 @@ async fn handle_request(
         original_model: model.clone(),
     };
 
-    let fc = fallback_config.clone();
+    let ec = state.error_codes.clone();
 
     let result = executor
         .execute(
             |params, body| {
                 let client = client.clone();
                 let headers = original_headers.clone();
-                let fc = fc.clone();
+                let ec = ec.clone();
                 let body = proxy::replace_model(&body, params.step_model.as_deref());
                 async move {
-                    let classifier = ErrorClassifier::from_config(&fc, params.provider_type);
+                    let classifier = ErrorClassifier::new(params.provider_type, ec.as_ref());
                     upstream_attempt(&client, params, &headers, body, &classifier).await
                 }
             },
@@ -378,13 +379,13 @@ async fn upstream_attempt(
             status,
             body: body_text,
             error_type,
-            description: description.map(|s| s.to_string()),
+            description,
         },
         Classification::NonRetryable { error_type, description } => AttemptOutcome::NonRetryableFailure {
             status,
             body: body_text,
             error_type,
-            description: description.map(|s| s.to_string()),
+            description,
         },
         Classification::Fatal => AttemptOutcome::Fatal {
             status,

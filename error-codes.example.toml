@@ -1,0 +1,94 @@
+# zrouter error code rules
+# Define error classification per provider.
+# The [default] section is used for providers not listed in this file.
+# If error_codes_file is not set in config.toml, all providers have no rules
+# and every non-2xx response is classified as Fatal.
+#
+# Format: { code = HTTP_STATUS, error_type = "JSON error.type filter", description = "..." }
+# error_type is optional: omit it to match all errors with that HTTP status.
+
+[default]
+retryable = [
+  { code = 429, description = "Rate limited (HTTP 429): too many requests — retry after brief wait" },
+  { code = 500, description = "Server error (HTTP 500): internal server error — retry later" },
+  { code = 502, description = "Bad gateway (HTTP 502): upstream error — retry later" },
+  { code = 503, description = "Unavailable (HTTP 503): service unavailable — retry later" },
+  { code = 504, description = "Timeout (HTTP 504): gateway timeout — retry later" },
+]
+non_retryable = [
+  { code = 400, description = "Bad request (HTTP 400): invalid request — check request body" },
+  { code = 401, description = "Unauthorized (HTTP 401): authentication failed — check API key" },
+  { code = 403, description = "Forbidden (HTTP 403): access denied — check permissions" },
+  { code = 404, description = "Not found (HTTP 404): resource not found — check endpoint" },
+]
+
+[anthropic]
+retryable = [
+  { code = 429, error_type = "rate_limit_error", description = "Rate limit (HTTP 429): request exceeded rate limit — reduce frequency or upgrade plan" },
+  { code = 500, error_type = "api_error", description = "API error (HTTP 500): Anthropic server error — retry later" },
+  { code = 504, error_type = "timeout_error", description = "Timeout (HTTP 504): request timed out — use streaming for long requests" },
+  { code = 529, error_type = "overloaded_error", description = "Overloaded (HTTP 529): API temporarily overloaded — retry after brief wait" },
+]
+non_retryable = [
+  { code = 400, error_type = "invalid_request_error", description = "Invalid request (HTTP 400): bad format or content — check request body" },
+  { code = 401, error_type = "authentication_error", description = "Auth error (HTTP 401): API key issue — verify key is correct" },
+  { code = 402, error_type = "billing_error", description = "Billing error (HTTP 402): payment issue — check billing in Console" },
+  { code = 403, error_type = "permission_error", description = "Permission denied (HTTP 403): insufficient permissions — check API key access" },
+  { code = 404, error_type = "not_found_error", description = "Not found (HTTP 404): resource does not exist — verify endpoint and model" },
+  { code = 413, error_type = "request_too_large", description = "Request too large (HTTP 413): exceeds 32 MB limit — reduce request size" },
+]
+
+[deepseek]
+retryable = [
+  { code = 429, description = "Rate limit (HTTP 429): TPM or RPM limit exceeded — pace requests reasonably" },
+  { code = 500, description = "Server error (HTTP 500): internal server fault — retry after brief wait" },
+  { code = 503, description = "Unavailable (HTTP 503): server overloaded — retry after brief wait" },
+]
+non_retryable = [
+  { code = 400, description = "Bad request (HTTP 400): request body format error — fix format per error hints" },
+  { code = 401, description = "Auth error (HTTP 401): wrong API key — check or create API key" },
+  { code = 402, description = "Payment required (HTTP 402): account balance insufficient — top up account" },
+  { code = 422, description = "Unprocessable (HTTP 422): invalid parameters — fix parameters per error hints" },
+]
+
+[zhipu]
+retryable = [
+  { code = 429, description = "Rate limit (HTTP 429): concurrency or frequency exceeded — reduce load or contact support" },
+  { code = 500, description = "Server error (HTTP 500): internal error — retry later" },
+  { code = 503, description = "Unavailable (HTTP 503): service overloaded — retry after brief wait" },
+]
+non_retryable = [
+  { code = 400, description = "Bad request (HTTP 400): parameter error — check API docs" },
+  { code = 401, description = "Auth error (HTTP 401): authentication failed or token expired — verify API key" },
+  { code = 402, description = "Payment required (HTTP 402): account in arrears — recharge and retry" },
+  { code = 403, description = "Forbidden (HTTP 403): access denied — check account permissions" },
+  { code = 404, description = "Not found (HTTP 404): resource not found — verify endpoint" },
+  { code = 435, description = "File too large (HTTP 435): file exceeds 100 MB limit — use smaller file" },
+]
+
+[kimi]
+retryable = [
+  { code = 429, error_type = "rate_limit_reached_error", description = "Rate limit (HTTP 429): RPM/TPM/TPD or concurrency limit reached — wait and retry" },
+  { code = 429, error_type = "engine_overloaded_error", description = "Overloaded (HTTP 429): engine overloaded — try again later or upgrade tier" },
+  { code = 429, error_type = "exceeded_current_quota_error", description = "Quota exceeded (HTTP 429): account suspended or token quota exceeded — check balance" },
+  { code = 500, error_type = "server_error", description = "Server error (HTTP 500): internal error — retry later" },
+]
+non_retryable = [
+  { code = 400, description = "Bad request (HTTP 400): invalid format or missing params — check request body" },
+  { code = 401, description = "Auth error (HTTP 401): API key incorrect — verify key and platform (kimi.com vs kimi.ai)" },
+  { code = 403, error_type = "permission_denied_error", description = "Permission denied (HTTP 403): API not available or access denied" },
+  { code = 404, description = "Not found (HTTP 404): model not found or no access — verify model name" },
+]
+
+[openai]
+retryable = [
+  { code = 429, error_type = "rate_limit_error", description = "Rate limit (HTTP 429): request rate exceeded — pace requests" },
+  { code = 500, error_type = "server_error", description = "Server error (HTTP 500): internal error — retry after brief wait" },
+  { code = 503, error_type = "service_unavailable", description = "Unavailable (HTTP 503): service unavailable — retry after brief wait" },
+]
+non_retryable = [
+  { code = 400, error_type = "invalid_request_error", description = "Invalid request (HTTP 400): bad format — check request body" },
+  { code = 401, description = "Auth error (HTTP 401): wrong API key — verify key" },
+  { code = 403, error_type = "permission_error", description = "Permission denied (HTTP 403): insufficient permissions" },
+  { code = 404, description = "Not found (HTTP 404): resource not found — verify endpoint" },
+]
